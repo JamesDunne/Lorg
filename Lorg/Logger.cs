@@ -173,7 +173,7 @@ namespace Lorg
         /// </summary>
         /// <param name="a">Asynchronous task to catch exceptions from</param>
         /// <returns></returns>
-        public async Task HandleExceptions(Func<Task> a)
+        public async Task HandleExceptions(Func<Task> a, bool isHandled = false, Guid? correlationID = null)
         {
             Exception exToLog = null;
 
@@ -187,7 +187,7 @@ namespace Lorg
             }
 
             if (exToLog != null)
-                await Write(exToLog);
+                await Write(exToLog, isHandled, correlationID);
         }
 
         /// <summary>

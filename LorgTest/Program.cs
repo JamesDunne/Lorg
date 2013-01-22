@@ -44,7 +44,7 @@ namespace LorgTest
             var sw = Stopwatch.StartNew();
             for (int i = 0; i < 1000; ++i)
             {
-                await log.HandleExceptions(a);
+                await log.HandleExceptions(a, isHandled: true);
             }
             sw.Stop();
             Console.WriteLine("{0} ms", sw.ElapsedMilliseconds);
