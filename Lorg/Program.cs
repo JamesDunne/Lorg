@@ -23,8 +23,11 @@ namespace Lorg
                         {
                             InitialCatalog = "Lorg",
                             DataSource = ".",
-                            AsynchronousProcessing = true
-                        }.ToString()
+                            AsynchronousProcessing = true,
+                            IntegratedSecurity = true,
+                        }.ToString(),
+                        ApplicationName = "Test",
+                        EnvironmentName = "Local",
                     }
                 );
 
@@ -44,7 +47,7 @@ namespace Lorg
             }
             catch (Exception ex)
             {
-                log.Write(ex);
+                log.Write(ex).Wait();
             }
         }
 

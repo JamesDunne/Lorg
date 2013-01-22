@@ -35,6 +35,9 @@ namespace Lorg
             public string ApplicationName { get; internal set; }
             public string EnvironmentName { get; internal set; }
             public string ConnectionString { get; internal set; }
+
+            public string MachineName { get; internal set; }
+            public string ProcessPath { get; internal set; }
         }
 
         /// <summary>
@@ -57,7 +60,10 @@ namespace Lorg
             {
                 ApplicationName = cfg.ApplicationName,
                 EnvironmentName = cfg.EnvironmentName,
-                ConnectionString = csb.ToString()
+                ConnectionString = csb.ToString(),
+
+                MachineName = Environment.MachineName,
+                ProcessPath = "", // TODO(jsd)
             };
         }
 
@@ -96,6 +102,34 @@ namespace Lorg
 
             if (report != null)
                 await FailoverWrite(report);
+        }
+
+        public async Task Write(Exception ex)
+        {
+            bool failureMode = noConnection;
+            Exception symptom = null;
+
+            if (!failureMode)
+            {
+                try
+                {
+                    await WriteDatabase(ex);
+                }
+                catch (Exception ourEx)
+                {
+                    // Hmm...
+                    failureMode = true;
+                    symptom = ourEx;
+                }
+            }
+
+            if (failureMode)
+            {
+                Exception report = ex;
+                if (symptom != null)
+                    report = new SymptomaticException(symptom, ex);
+                await FailoverWrite(report);
+            }
         }
 
         public static string FormatException(Exception ex, int indent = 0)
@@ -158,47 +192,212 @@ namespace Lorg
             await Console.Error.WriteLineAsync(output);
         }
 
-        public async Task WriteDatabase(Exception ex)
+        async Task<Tuple<byte[], int>> WriteDatabase(Exception ex)
         {
-            //ex.StackTrace;
-            //ex.TargetSite;
+            Debug.Assert(ex != null);
 
+            var loggedTimeUTC = DateTime.UtcNow;
+
+            var exType = ex.GetType();
+            var typeName = exType.FullName;
+            var assemblyName = exType.Assembly.FullName;
+            // TODO(jsd): Sanitize embedded file paths in stack trace
+            var stackTrace = ex.StackTrace;
+
+            // SHA1 hash the `assemblyName:typeName:stackTrace`:
+            var exExceptionID = SHA1Hash(String.Concat(assemblyName, ":", typeName, ":", stackTrace));
+
+            using (var conn = new SqlConnection(cfg.ConnectionString))
+            {
+                await conn.OpenAsync();
+
+                // Check if the exException record exists:
+                var exists = await ExecReader(
+                    conn,
+@"SELECT [exExceptionID] FROM [dbo].[exException] WITH (NOLOCK) WHERE exExceptionID = @exExceptionID",
+                    prms =>
+                    {
+                        AddParameterWithSize(prms, "@exExceptionID", SqlDbType.Binary, 20, exExceptionID);
+                    },
+                    (dr, cmd) => dr.ReadAsync()
+                );
+
+                // Create the exException record if it does not exist:
+                if (!exists)
+                {
+                    await ExecNonQuery(
+                        conn,
+@"INSERT INTO [dbo].[exException] ([exExceptionID], [AssemblyName], [TypeName], [StackTrace]) VALUES (@exExceptionID, @assemblyName, @typeName, @stackTrace);
+SET @exInstanceID = SCOPE_IDENTITY();",
+                        prms =>
+                        {
+                            AddParameterOut(prms, "@exInstanceID", SqlDbType.Int);
+                            AddParameterWithSize(prms, "@exExceptionID", SqlDbType.Binary, 20, exExceptionID);
+                            AddParameterWithSize(prms, "@assemblyName", SqlDbType.NVarChar, 256, assemblyName);
+                            AddParameterWithSize(prms, "@typeName", SqlDbType.NVarChar, 256, typeName);
+                            AddParameterWithSize(prms, "@stackTrace", SqlDbType.NVarChar, -1, stackTrace);
+                        }
+                    );
+                }
+
+                // Create the instance record:
+                int exInstanceID = await ExecNonQuery(
+                    conn,
+@"INSERT INTO [dbo].[exInstance]
+    ([exExceptionID], [LoggedTimeUTC], [IsHandled], [CorrelationID], [Message], [ApplicationName], [MachineName], [ProcessPath], [ExecutingAssemblyName], [ManagedThreadId])
+VALUES (@exExceptionID, @loggedTimeUTC, @isHandled, @correlationID, @message, @applicationName, @machineName, @processPath, @executingAssemblyName, @managedThreadId);
+SET @exInstanceID = SCOPE_IDENTITY();",
+                    prms =>
+                    {
+                        AddParameterOut(prms, "@exInstanceID", SqlDbType.Int);
+                        AddParameterWithSize(prms, "@exExceptionID", SqlDbType.Binary, 20, exExceptionID);
+                        AddParameter(prms, "@loggedTimeUTC", SqlDbType.DateTime2, loggedTimeUTC);
+
+                        // TODO(jsd): IsHandled and CorrelationID
+                        AddParameter(prms, "@isHandled", SqlDbType.Bit, false);
+                        AddParameter(prms, "@correlationID", SqlDbType.UniqueIdentifier, Guid.NewGuid());
+
+                        AddParameterWithSize(prms, "@message", SqlDbType.NVarChar, 256, ex.Message);
+                        AddParameterWithSize(prms, "@applicationName", SqlDbType.VarChar, 96, cfg.ApplicationName);
+                        AddParameterWithSize(prms, "@machineName", SqlDbType.VarChar, 64, cfg.MachineName);
+                        AddParameterWithSize(prms, "@processPath", SqlDbType.NVarChar, 256, cfg.ProcessPath);
+                        AddParameterWithSize(prms, "@executingAssemblyName", SqlDbType.NVarChar, 256, ex.TargetSite.DeclaringType.Assembly.FullName);
+                        AddParameter(prms, "@ManagedThreadId", SqlDbType.Int, System.Threading.Thread.CurrentThread.ManagedThreadId);
+                    },
+                    (prms, rc) =>
+                    {
+                        return (int)prms["@exInstanceID"].Value;
+                    }
+                );
+
+                return new Tuple<byte[], int>(exExceptionID, exInstanceID);
+            }
+        }
+
+        #region Implementation details
+
+        static async Task<TResult> ExecReader<TResult>(
+            SqlConnection conn,
+            string text,
+            Action<SqlParameterCollection> bindParameters,
+            Func<SqlDataReader, SqlCommand, Task<TResult>> read
+        )
+        {
             using (var cmd = conn.CreateCommand())
             {
                 cmd.CommandType = CommandType.Text;
-                cmd.CommandText = @"
-MERGE INTO 
-";
-                await cmd.ExecuteNonQueryAsync();
+                cmd.CommandText = text;
+                bindParameters(cmd.Parameters);
+                using (var dr = await cmd.ExecuteReaderAsync(CommandBehavior.SequentialAccess))
+                    return await read(dr, cmd);
             }
         }
 
-        public async Task Write(Exception ex)
+        static async Task<TResult> ExecReader<TResult>(
+            SqlConnection conn,
+            string text,
+            Action<SqlParameterCollection> bindParameters,
+            Func<SqlDataReader, Task<TResult>> read
+        )
         {
-            bool failureMode = noConnection;
-            Exception symptom = null;
-
-            if (!failureMode)
+            using (var cmd = conn.CreateCommand())
             {
-                try
-                {
-                    await WriteDatabase(ex);
-                }
-                catch (Exception ourEx)
-                {
-                    // Hmm...
-                    failureMode = true;
-                    symptom = ourEx;
-                }
-            }
-
-            if (failureMode)
-            {
-                Exception report = ex;
-                if (symptom != null)
-                    report = new SymptomaticException(symptom, ex);
-                await FailoverWrite(report);
+                cmd.CommandType = CommandType.Text;
+                cmd.CommandText = text;
+                bindParameters(cmd.Parameters);
+                using (var dr = await cmd.ExecuteReaderAsync(CommandBehavior.SequentialAccess))
+                    return await read(dr);
             }
         }
+
+        static async Task<TResult> ExecReader<TResult>(
+            SqlConnection conn,
+            string text,
+            Func<SqlDataReader, Task<TResult>> read
+        )
+        {
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandType = CommandType.Text;
+                cmd.CommandText = text;
+                using (var dr = await cmd.ExecuteReaderAsync(CommandBehavior.SequentialAccess))
+                    return await read(dr);
+            }
+        }
+
+        static async Task<int> ExecNonQuery(
+            SqlConnection conn,
+            string text
+        )
+        {
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandType = CommandType.Text;
+                cmd.CommandText = text;
+                return await cmd.ExecuteNonQueryAsync();
+            }
+        }
+
+        static async Task<int> ExecNonQuery(
+            SqlConnection conn,
+            string text,
+            Action<SqlParameterCollection> bindParameters
+        )
+        {
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandType = CommandType.Text;
+                cmd.CommandText = text;
+                bindParameters(cmd.Parameters);
+                return await cmd.ExecuteNonQueryAsync();
+            }
+        }
+
+        static async Task<TResult> ExecNonQuery<TResult>(
+            SqlConnection conn,
+            string text,
+            Action<SqlParameterCollection> bindParameters,
+            Func<SqlParameterCollection, int, TResult> report
+        )
+        {
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandType = CommandType.Text;
+                cmd.CommandText = text;
+                bindParameters(cmd.Parameters);
+                int rc = await cmd.ExecuteNonQueryAsync();
+                return report(cmd.Parameters, rc);
+            }
+        }
+
+        static SqlParameter AddParameterOut(SqlParameterCollection prms, string name, SqlDbType type)
+        {
+            var prm = prms.Add(name, type);
+            prm.Direction = ParameterDirection.Output;
+            return prm;
+        }
+
+        static SqlParameter AddParameter(SqlParameterCollection prms, string name, SqlDbType type, object value)
+        {
+            var prm = prms.AddWithValue(name, value);
+            prm.SqlDbType = type;
+            return prm;
+        }
+
+        static SqlParameter AddParameterWithSize(SqlParameterCollection prms, string name, SqlDbType type, int size, object value)
+        {
+            var prm = prms.AddWithValue(name, value);
+            prm.SqlDbType = type;
+            prm.Size = size;
+            return prm;
+        }
+
+        static byte[] SHA1Hash(string p)
+        {
+            using (var sha1 = System.Security.Cryptography.SHA1Managed.Create())
+                return sha1.ComputeHash(new UTF8Encoding(false).GetBytes(p));
+        }
+
+        #endregion
     }
 }
