@@ -71,12 +71,6 @@ namespace Lorg
             };
         }
 
-        public Logger()
-        {
-            this.cfg = new ValidConfiguration() { ApplicationName = String.Empty, EnvironmentName = String.Empty, ConnectionString = null };
-            this.noConnection = true;
-        }
-
         /// <summary>
         /// Attempt to initialize the logger with the given configuration.
         /// </summary>
@@ -97,6 +91,15 @@ namespace Lorg
             }
 
             return log;
+        }
+
+        /// <summary>
+        /// Construct an instance with default configuration.
+        /// </summary>
+        public Logger()
+        {
+            this.cfg = new ValidConfiguration() { ApplicationName = String.Empty, EnvironmentName = String.Empty, ConnectionString = null };
+            this.noConnection = true;
         }
 
         /// <summary>
@@ -165,50 +168,26 @@ namespace Lorg
             }
         }
 
-        public static string FormatException(Exception ex, int indent = 0)
+        /// <summary>
+        /// Wrapper method to catch and log exceptions thrown by <paramref name="a"/>.
+        /// </summary>
+        /// <param name="a">Asynchronous task to catch exceptions from</param>
+        /// <returns></returns>
+        public async Task HandleExceptions(Func<Task> a)
         {
-            if (ex == null) return "(null)";
+            Exception exToLog = null;
 
-            var sb = new StringBuilder();
-            Format(ex, sb, 0);
-            return sb.ToString();
-        }
-
-        static void Format(Exception ex, StringBuilder sb, int indent)
-        {
-            if (ex == null) return;
-
-            string indentStr = new string(' ', indent * 2);
-            string nlIndent = nl + indentStr;
-            string indent2Str = new string(' ', (indent + 1) * 2);
-            string nlIndent2 = nl + indent2Str;
-            sb.Append(indentStr);
-
-            SymptomaticException symp;
-            if ((symp = ex as SymptomaticException) != null)
+            try
             {
-                sb.Append("SymptomaticException:");
-                sb.Append(nlIndent2);
-                sb.Append("Actual:");
-                sb.Append(nl);
-                Format(symp.Actual, sb, indent + 2);
-                sb.Append(nlIndent2);
-                sb.Append("Symptom:");
-                sb.Append(nl);
-                Format(symp.Symptom, sb, indent + 2);
+                await a();
             }
-            else
+            catch (Exception ex)
             {
-                sb.Append(ex.ToString().Replace("\r\n", nl).Replace(nl, nlIndent));
+                exToLog = ex;
             }
 
-            if (ex.InnerException != null)
-            {
-                sb.Append(nlIndent);
-                sb.Append("Inner:");
-                sb.Append(nl);
-                Format(ex.InnerException, sb, indent + 1);
-            }
+            if (exToLog != null)
+                await Write(exToLog);
         }
 
         /// <summary>
@@ -218,12 +197,23 @@ namespace Lorg
         /// <returns></returns>
         public static async Task FailoverWrite(Exception ex)
         {
+#if TRACE
             string output = FormatException(ex);
             // Write to what we know:
-            Debug.WriteLine(output);
             Trace.WriteLine(output);
-            await Console.Error.WriteLineAsync(output);
+#endif
         }
+
+        public static string FormatException(Exception ex, int indent = 0)
+        {
+            if (ex == null) return "(null)";
+
+            var sb = new StringBuilder();
+            Format(ex, sb, 0);
+            return sb.ToString();
+        }
+
+        #region Implementation details
 
         async Task<Tuple<byte[], int>> WriteDatabase(Exception ex, bool isHandled, Guid? correlationID)
         {
@@ -310,7 +300,42 @@ SET @exInstanceID = SCOPE_IDENTITY();",
             }
         }
 
-        #region Implementation details
+        static void Format(Exception ex, StringBuilder sb, int indent)
+        {
+            if (ex == null) return;
+
+            string indentStr = new string(' ', indent * 2);
+            string nlIndent = nl + indentStr;
+            string indent2Str = new string(' ', (indent + 1) * 2);
+            string nlIndent2 = nl + indent2Str;
+            sb.Append(indentStr);
+
+            SymptomaticException symp;
+            if ((symp = ex as SymptomaticException) != null)
+            {
+                sb.Append("SymptomaticException:");
+                sb.Append(nlIndent2);
+                sb.Append("Actual:");
+                sb.Append(nl);
+                Format(symp.Actual, sb, indent + 2);
+                sb.Append(nlIndent2);
+                sb.Append("Symptom:");
+                sb.Append(nl);
+                Format(symp.Symptom, sb, indent + 2);
+            }
+            else
+            {
+                sb.Append(ex.ToString().Replace("\r\n", nl).Replace(nl, nlIndent));
+            }
+
+            if (ex.InnerException != null)
+            {
+                sb.Append(nlIndent);
+                sb.Append("Inner:");
+                sb.Append(nl);
+                Format(ex.InnerException, sb, indent + 1);
+            }
+        }
 
         static async Task<TResult> ExecReader<TResult>(
             SqlConnection conn,

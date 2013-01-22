@@ -4,11 +4,11 @@
   <PropertyGroup>
     <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
     <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
-    <ProjectGuid>{A6B5443E-20E5-4ED1-9E8C-DCFE03B15A3C}</ProjectGuid>
-    <OutputType>Library</OutputType>
+    <ProjectGuid>{2D10C761-A7D6-4755-AE3E-B25EE86166DD}</ProjectGuid>
+    <OutputType>Exe</OutputType>
     <AppDesignerFolder>Properties</AppDesignerFolder>
-    <RootNamespace>Lorg</RootNamespace>
-    <AssemblyName>Lorg</AssemblyName>
+    <RootNamespace>LorgTest</RootNamespace>
+    <AssemblyName>LorgTest</AssemblyName>
     <TargetFrameworkVersion>v4.5</TargetFrameworkVersion>
     <FileAlignment>512</FileAlignment>
     <TargetFrameworkProfile />
@@ -34,9 +34,6 @@
     <WarningLevel>4</WarningLevel>
     <Prefer32Bit>false</Prefer32Bit>
   </PropertyGroup>
-  <PropertyGroup>
-    <StartupObject />
-  </PropertyGroup>
   <ItemGroup>
     <Reference Include="System" />
     <Reference Include="System.Core" />
@@ -46,9 +43,14 @@
     <Reference Include="System.Xml" />
   </ItemGroup>
   <ItemGroup>
-    <Compile Include="Logger.cs" />
+    <Compile Include="Program.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
-    <Compile Include="SymptomaticException.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Lorg\Lorg.csproj">
+      <Project>{a6b5443e-20e5-4ed1-9e8c-dcfe03b15a3c}</Project>
+      <Name>Lorg</Name>
+    </ProjectReference>
   </ItemGroup>
   <ItemGroup>
     <None Include="app.config" />
