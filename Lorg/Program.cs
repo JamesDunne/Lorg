@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Data.SqlClient;
+using System.Diagnostics;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
@@ -9,46 +10,37 @@ namespace Lorg
 {
     class Program
     {
-        static readonly Logger log = new Logger();
-
-        static Program()
-        {
-            Logger.ValidConfiguration cfg;
-            try
+        static readonly Logger log = Logger.AttemptInitialize(
+            new Logger.Configuration
             {
-                cfg = Logger.ValidateConfiguration(
-                    new Logger.Configuration
-                    {
-                        ConnectionString = new SqlConnectionStringBuilder()
-                        {
-                            InitialCatalog = "Lorg",
-                            DataSource = ".",
-                            AsynchronousProcessing = true,
-                            IntegratedSecurity = true,
-                        }.ToString(),
-                        ApplicationName = "Test",
-                        EnvironmentName = "Local",
-                    }
-                );
-
-                log.Initialize(cfg).Wait();
+                ConnectionString = new SqlConnectionStringBuilder()
+                {
+                    InitialCatalog = "Lorg",
+                    DataSource = ".",
+                    AsynchronousProcessing = true,
+                    IntegratedSecurity = true,
+                }.ToString(),
+                ApplicationName = "Test",
+                EnvironmentName = "Local",
             }
-            catch (Exception ex)
-            {
-                Logger.FailoverWrite(ex).Wait();
-            }
-        }
+        );
 
         static void DoTest(Action a)
         {
-            try
+            var sw = Stopwatch.StartNew();
+            for (int i = 0; i < 1000; ++i)
             {
-                a();
+                try
+                {
+                    a();
+                }
+                catch (Exception ex)
+                {
+                    log.Write(ex);
+                }
             }
-            catch (Exception ex)
-            {
-                log.Write(ex).Wait();
-            }
+            sw.Stop();
+            Console.WriteLine("{0} ms", sw.ElapsedMilliseconds);
         }
 
         static void Main(string[] args)

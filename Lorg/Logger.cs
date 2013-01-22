@@ -5,6 +5,7 @@ using System.Data.SqlClient;
 using System.Diagnostics;
 using System.Linq;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace Lorg
@@ -16,6 +17,7 @@ namespace Lorg
         ValidConfiguration cfg;
         SqlConnection conn;
         bool noConnection = false;
+        int SequenceNumber = 0;
 
         /// <summary>
         /// User-supplied configuration items.
@@ -38,6 +40,7 @@ namespace Lorg
 
             public string MachineName { get; internal set; }
             public string ProcessPath { get; internal set; }
+            public string ApplicationIdentity { get; internal set; }
         }
 
         /// <summary>
@@ -63,7 +66,8 @@ namespace Lorg
                 ConnectionString = csb.ToString(),
 
                 MachineName = Environment.MachineName,
-                ProcessPath = "", // TODO(jsd)
+                ProcessPath = Environment.GetCommandLineArgs()[0],
+                ApplicationIdentity = Thread.CurrentPrincipal.Identity.Name
             };
         }
 
@@ -71,6 +75,28 @@ namespace Lorg
         {
             this.cfg = new ValidConfiguration() { ApplicationName = String.Empty, EnvironmentName = String.Empty, ConnectionString = null };
             this.noConnection = true;
+        }
+
+        /// <summary>
+        /// Attempt to initialize the logger with the given configuration.
+        /// </summary>
+        /// <param name="cfg"></param>
+        /// <returns></returns>
+        public static Logger AttemptInitialize(Configuration cfg)
+        {
+            Logger log = new Logger();
+
+            try
+            {
+                ValidConfiguration valid = Logger.ValidateConfiguration(cfg);
+                log.Initialize(valid).Wait();
+            }
+            catch (Exception ex)
+            {
+                Logger.FailoverWrite(ex).Wait();
+            }
+
+            return log;
         }
 
         /// <summary>
@@ -104,7 +130,14 @@ namespace Lorg
                 await FailoverWrite(report);
         }
 
-        public async Task Write(Exception ex)
+        /// <summary>
+        /// Write the exception to the database.
+        /// </summary>
+        /// <param name="ex"></param>
+        /// <param name="isHandled">Whether the exception is explicitly handled or not.</param>
+        /// <param name="correlationID">A unique identifier to tie two or more exception reports together.</param>
+        /// <returns></returns>
+        public async Task Write(Exception ex, bool isHandled = false, Guid? correlationID = null)
         {
             bool failureMode = noConnection;
             Exception symptom = null;
@@ -113,7 +146,7 @@ namespace Lorg
             {
                 try
                 {
-                    await WriteDatabase(ex);
+                    await WriteDatabase(ex, isHandled, correlationID);
                 }
                 catch (Exception ourEx)
                 {
@@ -192,11 +225,13 @@ namespace Lorg
             await Console.Error.WriteLineAsync(output);
         }
 
-        async Task<Tuple<byte[], int>> WriteDatabase(Exception ex)
+        async Task<Tuple<byte[], int>> WriteDatabase(Exception ex, bool isHandled, Guid? correlationID)
         {
             Debug.Assert(ex != null);
 
             var loggedTimeUTC = DateTime.UtcNow;
+            int managedThreadId = Thread.CurrentThread.ManagedThreadId;
+            int sequenceNumber = Interlocked.Increment(ref SequenceNumber);
 
             var exType = ex.GetType();
             var typeName = exType.FullName;
@@ -227,11 +262,14 @@ namespace Lorg
                 {
                     await ExecNonQuery(
                         conn,
-@"INSERT INTO [dbo].[exException] ([exExceptionID], [AssemblyName], [TypeName], [StackTrace]) VALUES (@exExceptionID, @assemblyName, @typeName, @stackTrace);
-SET @exInstanceID = SCOPE_IDENTITY();",
+@"MERGE [dbo].[exException] AS target
+USING (SELECT @exExceptionID) AS source (exExceptionID)
+ON (target.exExceptionID = source.exExceptionID)
+WHEN NOT MATCHED THEN
+    INSERT ([exExceptionID], [AssemblyName], [TypeName], [StackTrace])
+    VALUES (@exExceptionID, @assemblyName, @typeName, @stackTrace);",
                         prms =>
                         {
-                            AddParameterOut(prms, "@exInstanceID", SqlDbType.Int);
                             AddParameterWithSize(prms, "@exExceptionID", SqlDbType.Binary, 20, exExceptionID);
                             AddParameterWithSize(prms, "@assemblyName", SqlDbType.NVarChar, 256, assemblyName);
                             AddParameterWithSize(prms, "@typeName", SqlDbType.NVarChar, 256, typeName);
@@ -243,26 +281,24 @@ SET @exInstanceID = SCOPE_IDENTITY();",
                 // Create the instance record:
                 int exInstanceID = await ExecNonQuery(
                     conn,
-@"INSERT INTO [dbo].[exInstance]
-    ([exExceptionID], [LoggedTimeUTC], [IsHandled], [CorrelationID], [Message], [ApplicationName], [MachineName], [ProcessPath], [ExecutingAssemblyName], [ManagedThreadId])
-VALUES (@exExceptionID, @loggedTimeUTC, @isHandled, @correlationID, @message, @applicationName, @machineName, @processPath, @executingAssemblyName, @managedThreadId);
+@"INSERT INTO [dbo].[exInstance] ([exExceptionID], [LoggedTimeUTC], [IsHandled], [CorrelationID], [Message], [ApplicationName], [EnvironmentName], [MachineName], [ProcessPath], [ExecutingAssemblyName], [ManagedThreadId], [ApplicationIdentity])
+VALUES (@exExceptionID, @loggedTimeUTC, @isHandled, @correlationID, @message, @applicationName, @environmentName, @machineName, @processPath, @executingAssemblyName, @managedThreadId, @applicationIdentity);
 SET @exInstanceID = SCOPE_IDENTITY();",
                     prms =>
                     {
                         AddParameterOut(prms, "@exInstanceID", SqlDbType.Int);
                         AddParameterWithSize(prms, "@exExceptionID", SqlDbType.Binary, 20, exExceptionID);
                         AddParameter(prms, "@loggedTimeUTC", SqlDbType.DateTime2, loggedTimeUTC);
-
-                        // TODO(jsd): IsHandled and CorrelationID
-                        AddParameter(prms, "@isHandled", SqlDbType.Bit, false);
-                        AddParameter(prms, "@correlationID", SqlDbType.UniqueIdentifier, Guid.NewGuid());
-
+                        AddParameter(prms, "@isHandled", SqlDbType.Bit, isHandled);
+                        AddParameter(prms, "@correlationID", SqlDbType.UniqueIdentifier, correlationID.HasValue ? correlationID.Value : (object)DBNull.Value);
                         AddParameterWithSize(prms, "@message", SqlDbType.NVarChar, 256, ex.Message);
                         AddParameterWithSize(prms, "@applicationName", SqlDbType.VarChar, 96, cfg.ApplicationName);
+                        AddParameterWithSize(prms, "@environmentName", SqlDbType.VarChar, 96, cfg.EnvironmentName);
                         AddParameterWithSize(prms, "@machineName", SqlDbType.VarChar, 64, cfg.MachineName);
                         AddParameterWithSize(prms, "@processPath", SqlDbType.NVarChar, 256, cfg.ProcessPath);
                         AddParameterWithSize(prms, "@executingAssemblyName", SqlDbType.NVarChar, 256, ex.TargetSite.DeclaringType.Assembly.FullName);
-                        AddParameter(prms, "@ManagedThreadId", SqlDbType.Int, System.Threading.Thread.CurrentThread.ManagedThreadId);
+                        AddParameter(prms, "@managedThreadId", SqlDbType.Int, managedThreadId);
+                        AddParameterWithSize(prms, "@applicationIdentity", SqlDbType.NVarChar, 128, cfg.ApplicationIdentity);
                     },
                     (prms, rc) =>
                     {
