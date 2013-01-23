@@ -43,6 +43,20 @@ namespace Lorg
             public string ApplicationIdentity { get; internal set; }
         }
 
+        public struct ThrownException
+        {
+            internal readonly Exception Exception;
+            internal readonly bool IsHandled;
+            internal readonly Guid? CorrelationID;
+
+            public ThrownException(Exception ex, bool isHandled = false, Guid? correlationID = null)
+            {
+                Exception = ex;
+                IsHandled = isHandled;
+                CorrelationID = correlationID;
+            }
+        }
+
         /// <summary>
         /// Validates user-supplied configuration items.
         /// </summary>
@@ -87,7 +101,7 @@ namespace Lorg
             }
             catch (Exception ex)
             {
-                Logger.FailoverWrite(ex).Wait();
+                log.FailoverWrite(ex).Wait();
             }
 
             return log;
@@ -140,8 +154,9 @@ namespace Lorg
         /// <param name="isHandled">Whether the exception is explicitly handled or not.</param>
         /// <param name="correlationID">A unique identifier to tie two or more exception reports together.</param>
         /// <returns></returns>
-        public async Task Write(Exception ex, bool isHandled = false, Guid? correlationID = null)
+        public async Task Write(ThrownException thrown)
         {
+            var ctx = GetContext(thrown);
             bool failureMode = noConnection;
             Exception symptom = null;
 
@@ -149,7 +164,7 @@ namespace Lorg
             {
                 try
                 {
-                    await WriteDatabase(ex, isHandled, correlationID);
+                    await WriteDatabase(ctx);
                 }
                 catch (Exception ourEx)
                 {
@@ -161,9 +176,10 @@ namespace Lorg
 
             if (failureMode)
             {
-                Exception report = ex;
+                // TODO(jsd): Clean this up
+                Exception report = thrown.Exception;
                 if (symptom != null)
-                    report = new SymptomaticException(symptom, ex);
+                    report = new SymptomaticException(symptom, thrown.Exception);
                 await FailoverWrite(report);
             }
         }
@@ -187,7 +203,7 @@ namespace Lorg
             }
 
             if (exToLog != null)
-                await Write(exToLog, isHandled, correlationID);
+                await Write(new ThrownException(exToLog, isHandled, correlationID));
         }
 
         /// <summary>
@@ -195,16 +211,16 @@ namespace Lorg
         /// </summary>
         /// <param name="ex"></param>
         /// <returns></returns>
-        public static async Task FailoverWrite(Exception ex)
+        public async Task FailoverWrite(Exception ex)
         {
-#if TRACE
             string output = FormatException(ex);
             // Write to what we know:
             Trace.WriteLine(output);
-#endif
+            // Log a Windows event log entry:
+            EventLog.WriteEntry(cfg.ApplicationName, output, EventLogEntryType.Error);
         }
 
-        public static string FormatException(Exception ex, int indent = 0)
+        public static string FormatException(Exception ex)
         {
             if (ex == null) return "(null)";
 
@@ -215,58 +231,89 @@ namespace Lorg
 
         #region Implementation details
 
-        async Task<Tuple<byte[], int>> WriteDatabase(Exception ex, bool isHandled, Guid? correlationID)
+        struct ThrownExceptionContext
         {
-            Debug.Assert(ex != null);
+            internal readonly ThrownException Thrown;
 
-            var loggedTimeUTC = DateTime.UtcNow;
-            int managedThreadId = Thread.CurrentThread.ManagedThreadId;
+            internal readonly byte[] ExceptionID;
+            internal readonly string AssemblyName;
+            internal readonly string TypeName;
+            internal readonly string StackTrace;
+
+            internal readonly DateTime LoggedTimeUTC;
+            internal readonly int ManagedThreadID;
+            internal readonly int SequenceNumber;
+
+            internal ThrownExceptionContext(
+                ThrownException thrown,
+                byte[] exceptionID,
+                string assemblyName,
+                string typeName,
+                string stackTrace,
+                DateTime loggedTimeUTC,
+                int managedThreadID,
+                int sequenceNumber
+            )
+            {
+                Thrown = thrown;
+                ExceptionID = exceptionID;
+                AssemblyName = assemblyName;
+                TypeName = typeName;
+                StackTrace = stackTrace;
+                LoggedTimeUTC = loggedTimeUTC;
+                ManagedThreadID = managedThreadID;
+                SequenceNumber = sequenceNumber;
+            }
+        }
+
+        ThrownExceptionContext GetContext(ThrownException thrown)
+        {
             int sequenceNumber = Interlocked.Increment(ref SequenceNumber);
 
-            var exType = ex.GetType();
+            var exType = thrown.Exception.GetType();
             var typeName = exType.FullName;
             var assemblyName = exType.Assembly.FullName;
             // TODO(jsd): Sanitize embedded file paths in stack trace
-            var stackTrace = ex.StackTrace;
+            var stackTrace = thrown.Exception.StackTrace;
 
             // SHA1 hash the `assemblyName:typeName:stackTrace`:
             var exExceptionID = SHA1Hash(String.Concat(assemblyName, ":", typeName, ":", stackTrace));
 
+            return new ThrownExceptionContext(
+                thrown,
+                exExceptionID,
+                assemblyName,
+                typeName,
+                stackTrace,
+                DateTime.UtcNow,
+                Thread.CurrentThread.ManagedThreadId,
+                Interlocked.Increment(ref SequenceNumber)
+            );
+        }
+
+        async Task<Tuple<byte[], int>> WriteDatabase(ThrownExceptionContext ctx)
+        {
             using (var conn = new SqlConnection(cfg.ConnectionString))
             {
                 await conn.OpenAsync();
 
-                // Check if the exException record exists:
-                var exists = await ExecReader(
-                    conn,
-@"SELECT [exExceptionID] FROM [dbo].[exException] WITH (NOLOCK) WHERE exExceptionID = @exExceptionID",
-                    prms =>
-                    {
-                        AddParameterWithSize(prms, "@exExceptionID", SqlDbType.Binary, 20, exExceptionID);
-                    },
-                    (dr, cmd) => dr.ReadAsync()
-                );
-
                 // Create the exException record if it does not exist:
-                if (!exists)
-                {
-                    await ExecNonQuery(
-                        conn,
+                await ExecNonQuery(
+                    conn,
 @"MERGE [dbo].[exException] AS target
 USING (SELECT @exExceptionID) AS source (exExceptionID)
 ON (target.exExceptionID = source.exExceptionID)
 WHEN NOT MATCHED THEN
     INSERT ([exExceptionID], [AssemblyName], [TypeName], [StackTrace])
     VALUES (@exExceptionID, @assemblyName, @typeName, @stackTrace);",
-                        prms =>
-                        {
-                            AddParameterWithSize(prms, "@exExceptionID", SqlDbType.Binary, 20, exExceptionID);
-                            AddParameterWithSize(prms, "@assemblyName", SqlDbType.NVarChar, 256, assemblyName);
-                            AddParameterWithSize(prms, "@typeName", SqlDbType.NVarChar, 256, typeName);
-                            AddParameterWithSize(prms, "@stackTrace", SqlDbType.NVarChar, -1, stackTrace);
-                        }
-                    );
-                }
+                    prms =>
+                    {
+                        AddParameterWithSize(prms, "@exExceptionID", SqlDbType.Binary, 20, ctx.ExceptionID);
+                        AddParameterWithSize(prms, "@assemblyName", SqlDbType.NVarChar, 256, ctx.AssemblyName);
+                        AddParameterWithSize(prms, "@typeName", SqlDbType.NVarChar, 256, ctx.TypeName);
+                        AddParameterWithSize(prms, "@stackTrace", SqlDbType.NVarChar, -1, ctx.StackTrace);
+                    }
+                );
 
                 // Create the instance record:
                 int exInstanceID = await ExecNonQuery(
@@ -277,17 +324,17 @@ SET @exInstanceID = SCOPE_IDENTITY();",
                     prms =>
                     {
                         AddParameterOut(prms, "@exInstanceID", SqlDbType.Int);
-                        AddParameterWithSize(prms, "@exExceptionID", SqlDbType.Binary, 20, exExceptionID);
-                        AddParameter(prms, "@loggedTimeUTC", SqlDbType.DateTime2, loggedTimeUTC);
-                        AddParameter(prms, "@isHandled", SqlDbType.Bit, isHandled);
-                        AddParameter(prms, "@correlationID", SqlDbType.UniqueIdentifier, correlationID.HasValue ? correlationID.Value : (object)DBNull.Value);
-                        AddParameterWithSize(prms, "@message", SqlDbType.NVarChar, 256, ex.Message);
+                        AddParameterWithSize(prms, "@exExceptionID", SqlDbType.Binary, 20, ctx.ExceptionID);
+                        AddParameter(prms, "@loggedTimeUTC", SqlDbType.DateTime2, ctx.LoggedTimeUTC);
+                        AddParameter(prms, "@isHandled", SqlDbType.Bit, ctx.Thrown.IsHandled);
+                        AddParameter(prms, "@correlationID", SqlDbType.UniqueIdentifier, ctx.Thrown.CorrelationID.HasValue ? ctx.Thrown.CorrelationID.Value : (object)DBNull.Value);
+                        AddParameterWithSize(prms, "@message", SqlDbType.NVarChar, 256, ctx.Thrown.Exception.Message);
                         AddParameterWithSize(prms, "@applicationName", SqlDbType.VarChar, 96, cfg.ApplicationName);
                         AddParameterWithSize(prms, "@environmentName", SqlDbType.VarChar, 96, cfg.EnvironmentName);
                         AddParameterWithSize(prms, "@machineName", SqlDbType.VarChar, 64, cfg.MachineName);
                         AddParameterWithSize(prms, "@processPath", SqlDbType.NVarChar, 256, cfg.ProcessPath);
-                        AddParameterWithSize(prms, "@executingAssemblyName", SqlDbType.NVarChar, 256, ex.TargetSite.DeclaringType.Assembly.FullName);
-                        AddParameter(prms, "@managedThreadId", SqlDbType.Int, managedThreadId);
+                        AddParameterWithSize(prms, "@executingAssemblyName", SqlDbType.NVarChar, 256, ctx.Thrown.Exception.TargetSite.DeclaringType.Assembly.FullName);
+                        AddParameter(prms, "@managedThreadId", SqlDbType.Int, ctx.ManagedThreadID);
                         AddParameterWithSize(prms, "@applicationIdentity", SqlDbType.NVarChar, 128, cfg.ApplicationIdentity);
                     },
                     (prms, rc) =>
@@ -296,7 +343,7 @@ SET @exInstanceID = SCOPE_IDENTITY();",
                     }
                 );
 
-                return new Tuple<byte[], int>(exExceptionID, exInstanceID);
+                return new Tuple<byte[], int>(ctx.ExceptionID, exInstanceID);
             }
         }
 
@@ -336,6 +383,8 @@ SET @exInstanceID = SCOPE_IDENTITY();",
                 Format(ex.InnerException, sb, indent + 1);
             }
         }
+
+        #region Database helper methods
 
         static async Task<TResult> ExecReader<TResult>(
             SqlConnection conn,
@@ -452,6 +501,8 @@ SET @exInstanceID = SCOPE_IDENTITY();",
             prm.Size = size;
             return prm;
         }
+
+        #endregion
 
         static byte[] SHA1Hash(string p)
         {
