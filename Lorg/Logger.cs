@@ -12,12 +12,10 @@ namespace Lorg
 {
     public sealed class Logger
     {
-        static string nl = "\n";
-
         ValidConfiguration cfg;
         SqlConnection conn;
         bool noConnection = false;
-        int SequenceNumber = 0;
+        int sequenceNumber = 0;
 
         /// <summary>
         /// User-supplied configuration items.
@@ -43,17 +41,54 @@ namespace Lorg
             public string ApplicationIdentity { get; internal set; }
         }
 
+        public class WebHostingContext
+        {
+            public string ApplicationID { get; private set; }
+            public string ApplicationPhysicalPath { get; private set; }
+            public string ApplicationVirtualPath { get; private set; }
+            public string SiteName { get; private set; }
+
+            /// <summary>
+            /// Initializes the WebHostingContext with values pulled from `System.Web.Hosting.HostingEnvironment`.
+            /// </summary>
+            public WebHostingContext()
+            {
+                ApplicationID = System.Web.Hosting.HostingEnvironment.ApplicationID;
+                ApplicationPhysicalPath = System.Web.Hosting.HostingEnvironment.ApplicationPhysicalPath;
+                ApplicationVirtualPath = System.Web.Hosting.HostingEnvironment.ApplicationVirtualPath;
+                SiteName = System.Web.Hosting.HostingEnvironment.SiteName;
+            }
+        }
+
+        /// <summary>
+        /// Represents a thrown exception and some context.
+        /// </summary>
         public struct ThrownException
         {
             internal readonly Exception Exception;
             internal readonly bool IsHandled;
             internal readonly Guid? CorrelationID;
+            internal readonly StackTrace StackTrace;
+            internal readonly System.Web.HttpContext HttpContext;
+            internal readonly WebHostingContext WebHostingContext;
 
-            public ThrownException(Exception ex, bool isHandled = false, Guid? correlationID = null)
+            /// <summary>
+            /// Represents a thrown exception and some context.
+            /// </summary>
+            /// <param name="ex">The exception that was thrown.</param>
+            /// <param name="isHandled">Whether the exception is explicitly handled or not.</param>
+            /// <param name="correlationID">A unique identifier to tie two or more exception reports together.</param>
+            /// <param name="stackTrace">The stack trace (only used for method context logging; detailed parameters).</param>
+            /// <param name="httpContext">The current HTTP context being handled, if applicable.</param>
+            /// <param name="webHostingContext">The current web application hosting context, if applicable.</param>
+            public ThrownException(Exception ex, bool isHandled = false, Guid? correlationID = null, StackTrace stackTrace = null, System.Web.HttpContext httpContext = null, WebHostingContext webHostingContext = null)
             {
                 Exception = ex;
                 IsHandled = isHandled;
                 CorrelationID = correlationID;
+                StackTrace = stackTrace;
+                HttpContext = httpContext;
+                WebHostingContext = webHostingContext;
             }
         }
 
@@ -68,9 +103,10 @@ namespace Lorg
             if (String.IsNullOrWhiteSpace(cfg.ApplicationName)) throw new ArgumentNullException("ApplicationName");
             if (String.IsNullOrWhiteSpace(cfg.EnvironmentName)) throw new ArgumentNullException("EnvironmentName");
 
-            // Ensure that AsynchronousProcessing is enabled:
+            // Ensure that AsynchronousProcessing and MultipleActiveResultSets are both enabled:
             var csb = new SqlConnectionStringBuilder(cfg.ConnectionString);
             csb.AsynchronousProcessing = true;
+            csb.MultipleActiveResultSets = true;
 
             // Return the ValidConfiguration type that asserts we validated the user config:
             return new ValidConfiguration
@@ -150,9 +186,6 @@ namespace Lorg
         /// <summary>
         /// Write the exception to the database.
         /// </summary>
-        /// <param name="ex"></param>
-        /// <param name="isHandled">Whether the exception is explicitly handled or not.</param>
-        /// <param name="correlationID">A unique identifier to tie two or more exception reports together.</param>
         /// <returns></returns>
         public async Task Write(ThrownException thrown)
         {
@@ -168,7 +201,6 @@ namespace Lorg
                 }
                 catch (Exception ourEx)
                 {
-                    // Hmm...
                     failureMode = true;
                     symptom = ourEx;
                 }
@@ -184,14 +216,19 @@ namespace Lorg
             }
         }
 
+        WebHostingContext CurrentWebHost = new WebHostingContext();
+
         /// <summary>
         /// Wrapper method to catch and log exceptions thrown by <paramref name="a"/>.
         /// </summary>
-        /// <param name="a">Asynchronous task to catch exceptions from</param>
+        /// <param name="a">Asynchronous task to catch exceptions from.</param>
+        /// <param name="isHandled">Whether the exception is explicitly handled or not.</param>
+        /// <param name="correlationID">A unique identifier to tie two or more exception reports together.</param>
         /// <returns></returns>
         public async Task HandleExceptions(Func<Task> a, bool isHandled = false, Guid? correlationID = null)
         {
             Exception exToLog = null;
+            StackTrace stackTrace = null;
 
             try
             {
@@ -199,11 +236,15 @@ namespace Lorg
             }
             catch (Exception ex)
             {
+                // NOTE(jsd): `await` is not allowed in catch blocks.
                 exToLog = ex;
+                stackTrace = new StackTrace(ex, true);
             }
 
             if (exToLog != null)
-                await Write(new ThrownException(exToLog, isHandled, correlationID));
+            {
+                await Write(new ThrownException(exToLog, isHandled, correlationID, stackTrace, System.Web.HttpContext.Current, CurrentWebHost));
+            }
         }
 
         /// <summary>
@@ -268,8 +309,6 @@ namespace Lorg
 
         ThrownExceptionContext GetContext(ThrownException thrown)
         {
-            int sequenceNumber = Interlocked.Increment(ref SequenceNumber);
-
             var exType = thrown.Exception.GetType();
             var typeName = exType.FullName;
             var assemblyName = exType.Assembly.FullName;
@@ -287,10 +326,41 @@ namespace Lorg
                 stackTrace,
                 DateTime.UtcNow,
                 Thread.CurrentThread.ManagedThreadId,
-                Interlocked.Increment(ref SequenceNumber)
+                Interlocked.Increment(ref sequenceNumber)
             );
         }
 
+        class ExceptionPolicy
+        {
+            /// <summary>
+            /// Determines whether or not stack frames are logged in detail.
+            /// </summary>
+            public bool LogStackContext { get; private set; }
+            /// <summary>
+            /// Determines whether or not web context details are logged.
+            /// </summary>
+            public bool LogWebContext { get; private set; }
+
+            public ExceptionPolicy(bool logStackContext, bool logWebContext)
+            {
+                LogStackContext = logStackContext;
+                LogWebContext = logWebContext;
+            }
+
+            /// <summary>
+            /// Default exception-handling policy.
+            /// </summary>
+            public static ExceptionPolicy Default = new ExceptionPolicy(
+                logStackContext: false,
+                logWebContext: true
+            );
+        }
+
+        /// <summary>
+        /// Record the exception to the various database tables.
+        /// </summary>
+        /// <param name="ctx"></param>
+        /// <returns></returns>
         async Task<Tuple<byte[], int>> WriteDatabase(ThrownExceptionContext ctx)
         {
             using (var conn = new SqlConnection(cfg.ConnectionString))
@@ -298,21 +368,33 @@ namespace Lorg
                 await conn.OpenAsync();
 
                 // Create the exException record if it does not exist:
-                await ExecNonQuery(
+                var tskGetPolicy = ExecReader(
                     conn,
 @"MERGE [dbo].[exException] AS target
 USING (SELECT @exExceptionID) AS source (exExceptionID)
 ON (target.exExceptionID = source.exExceptionID)
 WHEN NOT MATCHED THEN
     INSERT ([exExceptionID], [AssemblyName], [TypeName], [StackTrace])
-    VALUES (@exExceptionID, @assemblyName, @typeName, @stackTrace);",
+    VALUES (@exExceptionID, @assemblyName, @typeName, @stackTrace);
+
+SELECT [LogStackContext], [LogWebContext]
+FROM [dbo].[exExceptionPolicy] WITH (NOLOCK)
+WHERE exExceptionID = @exExceptionID;",
                     prms =>
                     {
                         AddParameterWithSize(prms, "@exExceptionID", SqlDbType.Binary, 20, ctx.ExceptionID);
                         AddParameterWithSize(prms, "@assemblyName", SqlDbType.NVarChar, 256, ctx.AssemblyName);
                         AddParameterWithSize(prms, "@typeName", SqlDbType.NVarChar, 256, ctx.TypeName);
                         AddParameterWithSize(prms, "@stackTrace", SqlDbType.NVarChar, -1, ctx.StackTrace);
-                    }
+                    },
+                    // Read the SELECT result set into an ExceptionPolicy, or use the default policy:
+                    async dr =>
+                        !await dr.ReadAsync()
+                        ? ExceptionPolicy.Default
+                        : new ExceptionPolicy(
+                            logStackContext: dr.GetBoolean(dr.GetOrdinal("LogStackContext")),
+                            logWebContext: dr.GetBoolean(dr.GetOrdinal("LogWebContext"))
+                        )
                 );
 
                 // Create the instance record:
@@ -327,7 +409,7 @@ SET @exInstanceID = SCOPE_IDENTITY();",
                         AddParameterWithSize(prms, "@exExceptionID", SqlDbType.Binary, 20, ctx.ExceptionID);
                         AddParameter(prms, "@loggedTimeUTC", SqlDbType.DateTime2, ctx.LoggedTimeUTC);
                         AddParameter(prms, "@isHandled", SqlDbType.Bit, ctx.Thrown.IsHandled);
-                        AddParameter(prms, "@correlationID", SqlDbType.UniqueIdentifier, ctx.Thrown.CorrelationID.HasValue ? ctx.Thrown.CorrelationID.Value : (object)DBNull.Value);
+                        AddParameter(prms, "@correlationID", SqlDbType.UniqueIdentifier, AsDBNull(ctx.Thrown.CorrelationID));
                         AddParameterWithSize(prms, "@message", SqlDbType.NVarChar, 256, ctx.Thrown.Exception.Message);
                         AddParameterWithSize(prms, "@applicationName", SqlDbType.VarChar, 96, cfg.ApplicationName);
                         AddParameterWithSize(prms, "@environmentName", SqlDbType.VarChar, 96, cfg.EnvironmentName);
@@ -343,48 +425,170 @@ SET @exInstanceID = SCOPE_IDENTITY();",
                     }
                 );
 
+                // Await the exception policy result:
+                var policy = await tskGetPolicy;
+
+                // If logging the method context is enabled and we have a stack trace to work with, log it:
+                Task tskLoggingMethod = null;
+                if (policy.LogStackContext && ctx.Thrown.StackTrace != null)
+                {
+                    tskLoggingMethod = LogStackContext(conn, ctx, exInstanceID);
+                }
+
+                // If logging the web context is enabled and we have a web context to work with, log it:
+                Task tskLoggingWeb = null;
+                if (policy.LogWebContext && ctx.Thrown.HttpContext != null)
+                {
+                    tskLoggingWeb = LogWebContext(conn, ctx, exInstanceID);
+                }
+
+                // Wait for any outstanding logging tasks:
+                if (tskLoggingMethod != null) await tskLoggingMethod;
+                if (tskLoggingWeb != null) await tskLoggingWeb;
+
                 return new Tuple<byte[], int>(ctx.ExceptionID, exInstanceID);
             }
         }
 
-        static void Format(Exception ex, StringBuilder sb, int indent)
+        async Task LogStackContext(SqlConnection conn, ThrownExceptionContext ctx, int exInstanceID)
         {
-            if (ex == null) return;
+            // We require a StackTrace instance:
+            if (ctx.Thrown.StackTrace == null)
+                return;
 
-            string indentStr = new string(' ', indent * 2);
-            string nlIndent = nl + indentStr;
-            string indent2Str = new string(' ', (indent + 1) * 2);
-            string nlIndent2 = nl + indent2Str;
-            sb.Append(indentStr);
+            // TODO
+        }
 
-            SymptomaticException symp;
-            if ((symp = ex as SymptomaticException) != null)
-            {
-                sb.Append("SymptomaticException:");
-                sb.Append(nlIndent2);
-                sb.Append("Actual:");
-                sb.Append(nl);
-                Format(symp.Actual, sb, indent + 2);
-                sb.Append(nlIndent2);
-                sb.Append("Symptom:");
-                sb.Append(nl);
-                Format(symp.Symptom, sb, indent + 2);
-            }
-            else
-            {
-                sb.Append(ex.ToString().Replace("\r\n", nl).Replace(nl, nlIndent));
-            }
+        async Task LogWebContext(SqlConnection conn, ThrownExceptionContext ctx, int exInstanceID)
+        {
+            var http = ctx.Thrown.HttpContext;
+            var host = ctx.Thrown.WebHostingContext;
 
-            if (ex.InnerException != null)
-            {
-                sb.Append(nlIndent);
-                sb.Append("Inner:");
-                sb.Append(nl);
-                Format(ex.InnerException, sb, indent + 1);
-            }
+            // We require both HTTP and Host context:
+            if (http == null || host == null)
+                return;
+
+            // Try to get the authenticated user for the HTTP context:
+            string authUserName = null;
+            if (http.User != null && http.User.Identity != null)
+                authUserName = http.User.Identity.Name;
+
+            // Log URLs first:
+            byte[] requestURLQueryID = await LogURLQuery(conn, http.Request.Url);
+            byte[] referrerURLQueryID = null;
+            if (http.Request.UrlReferrer != null)
+                referrerURLQueryID = await LogURLQuery(conn, http.Request.UrlReferrer);
+
+            // Log the web context:
+            await ExecNonQuery(
+                conn,
+@"INSERT INTO [dbo].[exContextWeb]
+       ([exInstanceID], [ApplicationID], [ApplicationPhysicalPath], [ApplicationVirtualPath], [SiteName], [AuthenticatedUserName], [HttpVerb], [RequestURL], [ReferrerURL])
+VALUES (@exInstanceID,  @ApplicationID,  @ApplicationPhysicalPath,  @ApplicationVirtualPath,  @SiteName,  @AuthenticatedUserName,  @HttpVerb,  @RequestURL,  @ReferrerURL);",
+                prms =>
+                {
+                    AddParameter(prms, "@exInstanceID", SqlDbType.Int, exInstanceID);
+                    // Hosting environment:
+                    AddParameterWithSize(prms, "@ApplicationID", SqlDbType.VarChar, 96, host.ApplicationID);
+                    AddParameterWithSize(prms, "@ApplicationPhysicalPath", SqlDbType.NVarChar, 256, host.ApplicationPhysicalPath);
+                    AddParameterWithSize(prms, "@ApplicationVirtualPath", SqlDbType.NVarChar, 256, host.ApplicationVirtualPath);
+                    AddParameterWithSize(prms, "@SiteName", SqlDbType.VarChar, 96, host.SiteName);
+                    // Request details:
+                    AddParameterWithSize(prms, "@AuthenticatedUserName", SqlDbType.VarChar, 96, AsDBNull(authUserName));
+                    AddParameterWithSize(prms, "@HttpVerb", SqlDbType.VarChar, 16, http.Request.HttpMethod);
+                    AddParameterWithSize(prms, "@RequestURL", SqlDbType.Binary, 20, requestURLQueryID);
+                    AddParameterWithSize(prms, "@ReferrerURL", SqlDbType.Binary, 20, AsDBNull(referrerURLQueryID));
+                }
+            );
+
+        }
+
+        static byte[] GetURLID(Uri uri)
+        {
+            byte[] id = SHA1Hash("{0}://{1}:{2}{3}".F(uri.Scheme, uri.Host, uri.Port, uri.AbsolutePath));
+            Debug.Assert(id.Length == 20);
+            return id;
+        }
+
+        static byte[] GetURLQueryID(Uri uri)
+        {
+            byte[] id = SHA1Hash("{0}://{1}:{2}{3}{4}".F(uri.Scheme, uri.Host, uri.Port, uri.AbsolutePath, uri.Query));
+            Debug.Assert(id.Length == 20);
+            return id;
+        }
+
+        /// <summary>
+        /// Writes a URL without query-string to the exURL table.
+        /// </summary>
+        /// <param name="conn"></param>
+        /// <param name="uri"></param>
+        /// <returns></returns>
+        async Task<byte[]> LogURL(SqlConnection conn, Uri uri)
+        {
+            byte[] urlID = GetURLID(uri);
+
+            await ExecNonQuery(
+                conn,
+@"INSERT INTO [dbo].[exURL]
+       ([exURLID], [HostName], [PortNumber], [AbsolutePath], [Scheme])
+VALUES (@exURLID,  @HostName,  @PortNumber,  @AbsolutePath,  @Scheme);",
+                prms =>
+                {
+                    AddParameterWithSize(prms, "@exURLID", SqlDbType.Binary, 20, urlID);
+                    AddParameterWithSize(prms, "@HostName", SqlDbType.VarChar, 128, uri.Host);
+                    AddParameter(prms, "@PortNumber", SqlDbType.Int, (int)uri.Port);
+                    AddParameterWithSize(prms, "@AbsolutePath", SqlDbType.VarChar, 512, uri.AbsolutePath);
+                    AddParameterWithSize(prms, "@Scheme", SqlDbType.VarChar, 8, uri.Scheme);
+                }
+            );
+
+            return urlID;
+        }
+
+        /// <summary>
+        /// Writes a URL with query-string to the exURLQuery table.
+        /// </summary>
+        /// <param name="conn"></param>
+        /// <param name="uri"></param>
+        /// <returns></returns>
+        async Task<byte[]> LogURLQuery(SqlConnection conn, Uri uri)
+        {
+            // Log the base URL:
+            byte[] urlID = await LogURL(conn, uri);
+
+            // Compute the URLQueryID:
+            byte[] urlQueryID = GetURLQueryID(uri);
+
+            // Store the exURLQuery record:
+            await ExecNonQuery(
+                conn,
+@"INSERT INTO [dbo].[exURLQuery]
+       ([exURLQueryID], [exURLID], [QueryString])
+VALUES (@exURLQueryID,  @exURLID,  @QueryString);",
+                prms =>
+                {
+                    AddParameterWithSize(prms, "@exURLQueryID", SqlDbType.Binary, 20, urlQueryID);
+                    AddParameterWithSize(prms, "@exURLID", SqlDbType.Binary, 20, urlID);
+                    AddParameterWithSize(prms, "@QueryString", SqlDbType.VarChar, -1, AsDBNull(uri.Query));
+                }
+            );
+
+            return urlQueryID;
         }
 
         #region Database helper methods
+
+        static object AsDBNull<T>(T value) where T : class
+        {
+            if (value == null) return DBNull.Value;
+            return value;
+        }
+
+        static object AsDBNull<T>(Nullable<T> value) where T : struct
+        {
+            if (!value.HasValue) return DBNull.Value;
+            return value.Value;
+        }
 
         static async Task<TResult> ExecReader<TResult>(
             SqlConnection conn,
@@ -508,6 +712,45 @@ SET @exInstanceID = SCOPE_IDENTITY();",
         {
             using (var sha1 = System.Security.Cryptography.SHA1Managed.Create())
                 return sha1.ComputeHash(new UTF8Encoding(false).GetBytes(p));
+        }
+
+        const string nl = "\n";
+
+        static void Format(Exception ex, StringBuilder sb, int indent)
+        {
+            if (ex == null) return;
+
+            string indentStr = new string(' ', indent * 2);
+            string nlIndent = nl + indentStr;
+            string indent2Str = new string(' ', (indent + 1) * 2);
+            string nlIndent2 = nl + indent2Str;
+            sb.Append(indentStr);
+
+            SymptomaticException symp;
+            if ((symp = ex as SymptomaticException) != null)
+            {
+                sb.Append("SymptomaticException:");
+                sb.Append(nlIndent2);
+                sb.Append("Actual:");
+                sb.Append(nl);
+                Format(symp.Actual, sb, indent + 2);
+                sb.Append(nlIndent2);
+                sb.Append("Symptom:");
+                sb.Append(nl);
+                Format(symp.Symptom, sb, indent + 2);
+            }
+            else
+            {
+                sb.Append(ex.ToString().Replace("\r\n", nl).Replace(nl, nlIndent));
+            }
+
+            if (ex.InnerException != null)
+            {
+                sb.Append(nlIndent);
+                sb.Append("Inner:");
+                sb.Append(nl);
+                Format(ex.InnerException, sb, indent + 1);
+            }
         }
 
         #endregion

@@ -35,14 +35,19 @@ namespace LorgTest
         /// <param name="args"></param>
         static void Main(string[] args)
         {
-            DoTest(Test1).Wait();
-            DoTest(Test2).Wait();
+            Task.Run(async () =>
+            {
+                await log.HandleExceptions(async () => { throw new Exception("Primer"); }, isHandled: true);
+
+                await DoTest(Test1);
+                await DoTest(Test2);
+            }).Wait();
         }
 
         static async Task DoTest(Func<Task> a)
         {
             var sw = Stopwatch.StartNew();
-            for (int i = 0; i < 1000; ++i)
+            for (int i = 0; i < 2000; ++i)
             {
                 await log.HandleExceptions(a, isHandled: true);
             }
