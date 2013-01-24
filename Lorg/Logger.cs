@@ -374,25 +374,43 @@ SET @exInstanceID = SCOPE_IDENTITY();",
             byte[] requestURLQueryID = CalcURLQueryID(http.Url);
             byte[] referrerURLQueryID = http.UrlReferrer == null ? null : CalcURLQueryID(http.UrlReferrer);
 
+            byte[] exWebApplicationID = CalcWebApplicationID(host);
+
+            var tskWebApplication = ExecNonQuery(
+                conn,
+@"MERGE [dbo].[exWebApplication] AS target
+USING (SELECT @exWebApplicationID) AS source (exWebApplicationID)
+ON (target.exWebApplicationID = source.exWebApplicationID)
+WHEN NOT MATCHED THEN
+    INSERT ([exWebApplicationID], [MachineName], [ApplicationID], [PhysicalPath], [VirtualPath], [SiteName])
+    VALUES (@exWebApplicationID,  @MachineName,  @ApplicationID,  @PhysicalPath,  @VirtualPath,  @SiteName);",
+                prms =>
+                {
+                    AddParameterWithSize(prms, "@exWebApplicationID", SqlDbType.Binary, 20, exWebApplicationID);
+                    AddParameterWithSize(prms, "@MachineName", SqlDbType.NVarChar, 96, host.MachineName);
+                    AddParameterWithSize(prms, "@ApplicationID", SqlDbType.VarChar, 96, host.ApplicationID);
+                    AddParameterWithSize(prms, "@PhysicalPath", SqlDbType.NVarChar, 256, host.PhysicalPath);
+                    AddParameterWithSize(prms, "@VirtualPath", SqlDbType.NVarChar, 256, host.VirtualPath);
+                    AddParameterWithSize(prms, "@SiteName", SqlDbType.VarChar, 96, host.SiteName);
+                }
+            );
+
             // Log the web context:
             var tskContextWeb = ExecNonQuery(
                 conn,
 @"INSERT INTO [dbo].[exContextWeb]
-       ([exInstanceID], [ApplicationID], [ApplicationPhysicalPath], [ApplicationVirtualPath], [SiteName], [AuthenticatedUserName], [HttpVerb], [RequestURL], [ReferrerURL])
-VALUES (@exInstanceID,  @ApplicationID,  @ApplicationPhysicalPath,  @ApplicationVirtualPath,  @SiteName,  @AuthenticatedUserName,  @HttpVerb,  @RequestURL,  @ReferrerURL);",
+       ([exInstanceID], [exWebApplicationID], [AuthenticatedUserName], [HttpVerb], [RequestURLQueryID], [ReferrerURLQueryID])
+VALUES (@exInstanceID,  @exWebApplicationID,  @AuthenticatedUserName,  @HttpVerb,  @RequestURLQueryID,  @ReferrerURLQueryID);",
                 prms =>
                 {
                     AddParameter(prms, "@exInstanceID", SqlDbType.Int, exInstanceID);
                     // Hosting environment:
-                    AddParameterWithSize(prms, "@ApplicationID", SqlDbType.VarChar, 96, host.ApplicationID);
-                    AddParameterWithSize(prms, "@ApplicationPhysicalPath", SqlDbType.NVarChar, 256, host.ApplicationPhysicalPath);
-                    AddParameterWithSize(prms, "@ApplicationVirtualPath", SqlDbType.NVarChar, 256, host.ApplicationVirtualPath);
-                    AddParameterWithSize(prms, "@SiteName", SqlDbType.VarChar, 96, host.SiteName);
+                    AddParameterWithSize(prms, "@exWebApplicationID", SqlDbType.Binary, 20, exWebApplicationID);
                     // Request details:
                     AddParameterWithSize(prms, "@AuthenticatedUserName", SqlDbType.VarChar, 96, AsDBNull(authUserName));
                     AddParameterWithSize(prms, "@HttpVerb", SqlDbType.VarChar, 16, http.HttpMethod);
-                    AddParameterWithSize(prms, "@RequestURL", SqlDbType.Binary, 20, requestURLQueryID);
-                    AddParameterWithSize(prms, "@ReferrerURL", SqlDbType.Binary, 20, AsDBNull(referrerURLQueryID));
+                    AddParameterWithSize(prms, "@RequestURLQueryID", SqlDbType.Binary, 20, requestURLQueryID);
+                    AddParameterWithSize(prms, "@ReferrerURLQueryID", SqlDbType.Binary, 20, AsDBNull(referrerURLQueryID));
                 }
             );
 
@@ -407,7 +425,22 @@ VALUES (@exInstanceID,  @ApplicationID,  @ApplicationPhysicalPath,  @Application
             // Await the completion of the tasks:
             await tskRequestURL;
             if (tskReferrerURL != null) await tskReferrerURL;
+            await tskWebApplication;
             await tskContextWeb;
+        }
+
+        static byte[] CalcWebApplicationID(WebHostingContext host)
+        {
+            byte[] id = SHA1Hash(
+                String.Concat(
+                    host.MachineName, ":",
+                    host.ApplicationID, ":",
+                    host.PhysicalPath, ":",
+                    host.VirtualPath, ":",
+                    host.SiteName
+                )
+            );
+            return id;
         }
 
         /// <summary>

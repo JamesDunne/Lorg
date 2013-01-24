@@ -8,9 +8,10 @@ namespace Lorg
 {
     public class WebHostingContext
     {
+        public string MachineName { get; private set; }
         public string ApplicationID { get; private set; }
-        public string ApplicationPhysicalPath { get; private set; }
-        public string ApplicationVirtualPath { get; private set; }
+        public string PhysicalPath { get; private set; }
+        public string VirtualPath { get; private set; }
         public string SiteName { get; private set; }
 
         /// <summary>
@@ -18,9 +19,10 @@ namespace Lorg
         /// </summary>
         public WebHostingContext()
         {
+            MachineName = Environment.MachineName;
             ApplicationID = System.Web.Hosting.HostingEnvironment.ApplicationID;
-            ApplicationPhysicalPath = System.Web.Hosting.HostingEnvironment.ApplicationPhysicalPath;
-            ApplicationVirtualPath = System.Web.Hosting.HostingEnvironment.ApplicationVirtualPath;
+            PhysicalPath = System.Web.Hosting.HostingEnvironment.ApplicationPhysicalPath;
+            VirtualPath = System.Web.Hosting.HostingEnvironment.ApplicationVirtualPath;
             SiteName = System.Web.Hosting.HostingEnvironment.SiteName;
         }
     }
