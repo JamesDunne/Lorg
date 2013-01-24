@@ -11,21 +11,7 @@ namespace LorgMvcTest
         /// <summary>
         /// Default instance of exception logger.
         /// </summary>
-        public static readonly Lorg.Logger Log;
-
-        public static void CreateLogger()
-        {
-            // Dummy method to let static ctor do its thing.
-        }
-
-        public static Task HandleExceptions(Func<Task> a, bool isHandled = false, Guid? correlationID = null)
-        {
-            return Log.HandleExceptions(a, isHandled, correlationID);
-        }
-
-        static ExceptionLogger()
-        {
-            Log = Lorg.Logger.AttemptInitialize(new Lorg.Logger.Configuration()
+        public static readonly Lorg.Logger Log = new Lorg.Logger(Lorg.Logger.ValidateConfiguration(new Lorg.Logger.Configuration()
             {
                 ApplicationName = "LorgMvcTest",
                 EnvironmentName = "Local",
@@ -35,7 +21,17 @@ namespace LorgMvcTest
                     DataSource = ".",
                     IntegratedSecurity = true,
                 }.ToString()
-            });
+            }
+        ));
+
+        public static void CreateLogger()
+        {
+            // Dummy method to let static ctor do its thing.
+        }
+
+        public static Task HandleExceptions(Func<Task> a, bool isHandled = false, Guid? correlationID = null)
+        {
+            return Log.HandleExceptions(a, isHandled, correlationID);
         }
     }
 }

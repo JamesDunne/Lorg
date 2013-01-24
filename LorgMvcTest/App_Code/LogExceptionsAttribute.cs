@@ -9,18 +9,17 @@ namespace LorgMvcTest
 {
     public sealed class LogExceptionsAttribute : FilterAttribute, IExceptionFilter
     {
-        static Lorg.Logger.WebHostingContext hostingContext = new Lorg.Logger.WebHostingContext();
+        static Lorg.WebHostingContext hostingContext = new Lorg.WebHostingContext();
 
         public void OnException(ExceptionContext filterContext)
         {
             // Capture the thread-specific bits first before we jump into async execution:
-            var context = new Lorg.Logger.ExceptionThreadContext(
+            var context = new Lorg.ExceptionWithCapturedContext(
                 filterContext.Exception,
                 isHandled: false,
                 correlationID: null,
-                stackTrace: new System.Diagnostics.StackTrace(filterContext.Exception, true),
                 webHostingContext: hostingContext,
-                capturedHttpContext: new Lorg.Logger.CapturedHttpContext(filterContext.HttpContext)
+                capturedHttpContext: new Lorg.CapturedHttpContext(filterContext.HttpContext)
             );
 
             // Run the exception logger asynchronously:

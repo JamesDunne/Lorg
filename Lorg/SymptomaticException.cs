@@ -6,15 +6,15 @@ using System.Threading.Tasks;
 
 namespace Lorg
 {
-    public sealed class SymptomaticException : Exception
+    internal sealed class LoggerExceptionWithCapturedContext
     {
-        public Exception Symptom { get; private set; }
-        public Exception Actual { get; private set; }
+        internal ExceptionWithCapturedContext Actual { get; private set; }
+        internal ExceptionWithCapturedContext Symptom { get; private set; }
 
-        public SymptomaticException(Exception symptom, Exception actual)
+        internal LoggerExceptionWithCapturedContext(ExceptionWithCapturedContext actual, ExceptionWithCapturedContext symptom)
         {
-            Symptom = symptom;
             Actual = actual;
+            Symptom = symptom;
         }
     }
 }

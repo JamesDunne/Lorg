@@ -12,10 +12,17 @@ namespace Lorg
 {
     public sealed class Logger
     {
-        ValidConfiguration cfg;
-        SqlConnection conn;
+        const double connectRetrySeconds = 30.0d;
+
+        readonly ValidConfiguration cfg;
+
+        DateTime lastConnectAttempt = DateTime.UtcNow;
         bool noConnection = false;
-        int sequenceNumber = 0;
+
+        bool TryReconnect()
+        {
+            return DateTime.UtcNow.Subtract(lastConnectAttempt).TotalSeconds > connectRetrySeconds;
+        }
 
         /// <summary>
         /// User-supplied configuration items.
@@ -39,88 +46,17 @@ namespace Lorg
             public string MachineName { get; internal set; }
             public string ProcessPath { get; internal set; }
             public string ApplicationIdentity { get; internal set; }
-        }
 
-        public class WebHostingContext
-        {
-            public string ApplicationID { get; private set; }
-            public string ApplicationPhysicalPath { get; private set; }
-            public string ApplicationVirtualPath { get; private set; }
-            public string SiteName { get; private set; }
-
-            /// <summary>
-            /// Initializes the WebHostingContext with values pulled from `System.Web.Hosting.HostingEnvironment`.
-            /// </summary>
-            public WebHostingContext()
+            internal static readonly ValidConfiguration Default = new ValidConfiguration()
             {
-                ApplicationID = System.Web.Hosting.HostingEnvironment.ApplicationID;
-                ApplicationPhysicalPath = System.Web.Hosting.HostingEnvironment.ApplicationPhysicalPath;
-                ApplicationVirtualPath = System.Web.Hosting.HostingEnvironment.ApplicationVirtualPath;
-                SiteName = System.Web.Hosting.HostingEnvironment.SiteName;
-            }
-        }
+                ApplicationName = String.Empty,
+                EnvironmentName = String.Empty,
+                ConnectionString = null,
 
-        public class CapturedHttpContext
-        {
-            internal readonly Uri Url;
-            internal readonly Uri UrlReferrer;
-            internal readonly System.Security.Principal.IPrincipal User;
-            internal readonly string HttpMethod;
-
-            public CapturedHttpContext(System.Web.HttpContextBase httpContext)
-            {
-                Url = httpContext.Request.Url;
-                UrlReferrer = httpContext.Request.UrlReferrer;
-                User = httpContext.User;
-                HttpMethod = httpContext.Request.HttpMethod;
-            }
-
-            public CapturedHttpContext(System.Web.HttpContext httpContext)
-            {
-                Url = httpContext.Request.Url;
-                UrlReferrer = httpContext.Request.UrlReferrer;
-                User = httpContext.User;
-                HttpMethod = httpContext.Request.HttpMethod;
-            }
-        }
-
-        /// <summary>
-        /// Represents a thrown exception and some context.
-        /// </summary>
-        public class ExceptionThreadContext
-        {
-            internal readonly Exception Exception;
-            internal readonly bool IsHandled;
-            internal readonly Guid? CorrelationID;
-            internal readonly StackTrace StackTrace;
-            internal readonly CapturedHttpContext CapturedHttpContext;
-            internal readonly WebHostingContext WebHostingContext;
-
-            /// <summary>
-            /// Represents a thrown exception and some context.
-            /// </summary>
-            /// <param name="ex">The exception that was thrown.</param>
-            /// <param name="isHandled">Whether the exception is explicitly handled or not.</param>
-            /// <param name="correlationID">A unique identifier to tie two or more exception reports together.</param>
-            /// <param name="stackTrace">The stack trace (only used for method context logging; detailed parameters).</param>
-            /// <param name="httpContext">The current HTTP context being handled, if applicable.</param>
-            /// <param name="webHostingContext">The current web application hosting context, if applicable.</param>
-            public ExceptionThreadContext(
-                Exception ex,
-                bool isHandled = false,
-                Guid? correlationID = null,
-                StackTrace stackTrace = null,
-                WebHostingContext webHostingContext = null,
-                CapturedHttpContext capturedHttpContext = null
-            )
-            {
-                Exception = ex;
-                IsHandled = isHandled;
-                CorrelationID = correlationID;
-                StackTrace = stackTrace;
-                WebHostingContext = webHostingContext;
-                CapturedHttpContext = capturedHttpContext;
-            }
+                MachineName = Environment.MachineName,
+                ProcessPath = Environment.GetCommandLineArgs()[0],
+                ApplicationIdentity = String.Empty
+            };
         }
 
         /// <summary>
@@ -137,6 +73,7 @@ namespace Lorg
             // Ensure that AsynchronousProcessing and MultipleActiveResultSets are both enabled:
             var csb = new SqlConnectionStringBuilder(cfg.ConnectionString);
             csb.AsynchronousProcessing = true;
+            // TODO(jsd): Consider not requiring MARS and use multiple connections instead?
             csb.MultipleActiveResultSets = true;
 
             // Return the ValidConfiguration type that asserts we validated the user config:
@@ -153,97 +90,28 @@ namespace Lorg
         }
 
         /// <summary>
-        /// Attempt to initialize the logger with the given configuration.
-        /// </summary>
-        /// <param name="cfg"></param>
-        /// <returns></returns>
-        public static Logger AttemptInitialize(Configuration cfg)
-        {
-            Logger log = new Logger();
-
-            try
-            {
-                ValidConfiguration valid = Logger.ValidateConfiguration(cfg);
-                log.Initialize(valid).Wait();
-            }
-            catch (Exception ex)
-            {
-                log.FailoverWrite(ex).Wait();
-            }
-
-            return log;
-        }
-
-        /// <summary>
         /// Construct an instance with default configuration.
         /// </summary>
-        public Logger()
-        {
-            this.cfg = new ValidConfiguration() { ApplicationName = String.Empty, EnvironmentName = String.Empty, ConnectionString = null };
-            this.noConnection = true;
-        }
-
-        /// <summary>
-        /// Initializes the logger and makes sure the environment is sane.
-        /// </summary>
-        /// <returns></returns>
-        public async Task Initialize(ValidConfiguration cfg)
+        public Logger(ValidConfiguration cfg)
         {
             this.cfg = cfg;
-            this.conn = new SqlConnection(cfg.ConnectionString);
-            Exception report = null;
-
-            try
-            {
-                // Open the DB connection:
-                await conn.OpenAsync();
-                noConnection = false;
-
-                // TODO: Validate table schema
-            }
-            catch (Exception ex)
-            {
-                noConnection = true;
-                report = ex;
-
-                conn.Close();
-                conn.Dispose();
-            }
-
-            if (report != null)
-                await FailoverWrite(report);
         }
 
         /// <summary>
         /// Write the exception to the database.
         /// </summary>
         /// <returns></returns>
-        public async Task Write(ExceptionThreadContext thrown)
+        public async Task Write(ExceptionWithCapturedContext thrown)
         {
-            var ctx = GetContext(thrown);
-            bool failureMode = noConnection;
-            Exception symptom = null;
-
-            if (!failureMode)
+            try
             {
-                try
-                {
-                    await WriteDatabase(ctx);
-                }
-                catch (Exception ourEx)
-                {
-                    failureMode = true;
-                    symptom = ourEx;
-                }
+                await WriteDatabase(thrown);
             }
-
-            if (failureMode)
+            catch (Exception ourEx)
             {
-                // TODO(jsd): Clean this up
-                Exception report = thrown.Exception;
-                if (symptom != null)
-                    report = new SymptomaticException(symptom, thrown.Exception);
-                await FailoverWrite(report);
+                var actual = new ExceptionWithCapturedContext(ourEx, isHandled: true);
+                var report = new LoggerExceptionWithCapturedContext(actual, thrown);
+                FailoverWrite(report);
             }
         }
 
@@ -259,7 +127,6 @@ namespace Lorg
         public async Task HandleExceptions(Func<Task> a, bool isHandled = false, Guid? correlationID = null)
         {
             Exception exToLog = null;
-            StackTrace stackTrace = null;
 
             try
             {
@@ -269,16 +136,14 @@ namespace Lorg
             {
                 // NOTE(jsd): `await` is not allowed in catch blocks.
                 exToLog = ex;
-                stackTrace = new StackTrace(ex, true);
             }
 
             if (exToLog != null)
             {
-                await Write(new ExceptionThreadContext(
+                await Write(new ExceptionWithCapturedContext(
                     exToLog,
                     isHandled,
                     correlationID,
-                    stackTrace,
                     CurrentWebHost,
                     new CapturedHttpContext(System.Web.HttpContext.Current)
                 ));
@@ -290,83 +155,57 @@ namespace Lorg
         /// </summary>
         /// <param name="ex"></param>
         /// <returns></returns>
-        public async Task FailoverWrite(Exception ex)
+        public void FailoverWrite(ExceptionWithCapturedContext ctx)
         {
-            string output = FormatException(ex);
-            // Write to what we know:
-            Trace.WriteLine(output);
-            // Log a Windows event log entry:
-            EventLog.WriteEntry(cfg.ApplicationName, output, EventLogEntryType.Error);
+            var sb = new StringBuilder();
+            Format(ctx, sb, 0);
+            string output = sb.ToString();
+
+            FailoverWriteString(output);
         }
 
-        public static string FormatException(Exception ex)
+        internal void FailoverWrite(LoggerExceptionWithCapturedContext ctx)
         {
-            if (ex == null) return "(null)";
+            // Format:
+            var sb = new StringBuilder();
+            sb.Append("Actual:");
+            sb.Append(nl);
+            sb.Append(IndentString(1));
+            Format(ctx.Actual, sb, 1);
+            sb.Append(nl);
+            sb.Append(IndentString(1));
+            sb.Append("Symptom:");
+            Format(ctx.Symptom, sb, 1);
+            string output = sb.ToString();
+
+            FailoverWriteString(output);
+        }
+
+        void FailoverWriteString(string output)
+        {
+            // Write to the Trace:
+            Trace.WriteLine(output);
+            try
+            {
+                // Log a Windows event log entry:
+                EventLog.WriteEntry(cfg.ApplicationName, output, EventLogEntryType.Error);
+            }
+            catch
+            {
+                // I got nothin'.
+            }
+        }
+
+        public static string FormatException(ExceptionWithCapturedContext ctx)
+        {
+            if (ctx == null) return "(null)";
 
             var sb = new StringBuilder();
-            Format(ex, sb, 0);
+            Format(ctx, sb, 0);
             return sb.ToString();
         }
 
         #region Implementation details
-
-        struct ThrownExceptionContext
-        {
-            internal readonly ExceptionThreadContext Thrown;
-
-            internal readonly byte[] ExceptionID;
-            internal readonly string AssemblyName;
-            internal readonly string TypeName;
-            internal readonly string StackTrace;
-
-            internal readonly DateTime LoggedTimeUTC;
-            internal readonly int ManagedThreadID;
-            internal readonly int SequenceNumber;
-
-            internal ThrownExceptionContext(
-                ExceptionThreadContext thrown,
-                byte[] exceptionID,
-                string assemblyName,
-                string typeName,
-                string stackTrace,
-                DateTime loggedTimeUTC,
-                int managedThreadID,
-                int sequenceNumber
-            )
-            {
-                Thrown = thrown;
-                ExceptionID = exceptionID;
-                AssemblyName = assemblyName;
-                TypeName = typeName;
-                StackTrace = stackTrace;
-                LoggedTimeUTC = loggedTimeUTC;
-                ManagedThreadID = managedThreadID;
-                SequenceNumber = sequenceNumber;
-            }
-        }
-
-        ThrownExceptionContext GetContext(ExceptionThreadContext thrown)
-        {
-            var exType = thrown.Exception.GetType();
-            var typeName = exType.FullName;
-            var assemblyName = exType.Assembly.FullName;
-            // TODO(jsd): Sanitize embedded file paths in stack trace
-            var stackTrace = thrown.Exception.StackTrace;
-
-            // SHA1 hash the `assemblyName:typeName:stackTrace`:
-            var exExceptionID = SHA1Hash(String.Concat(assemblyName, ":", typeName, ":", stackTrace));
-
-            return new ThrownExceptionContext(
-                thrown,
-                exExceptionID,
-                assemblyName,
-                typeName,
-                stackTrace,
-                DateTime.UtcNow,
-                Thread.CurrentThread.ManagedThreadId,
-                Interlocked.Increment(ref sequenceNumber)
-            );
-        }
 
         class ExceptionPolicy
         {
@@ -399,11 +238,25 @@ namespace Lorg
         /// </summary>
         /// <param name="ctx"></param>
         /// <returns></returns>
-        async Task<Tuple<byte[], int>> WriteDatabase(ThrownExceptionContext ctx)
+        async Task<Tuple<byte[], int>> WriteDatabase(ExceptionWithCapturedContext ctx)
         {
             using (var conn = new SqlConnection(cfg.ConnectionString))
             {
-                await conn.OpenAsync();
+                bool attempt = true;
+                if (noConnection) attempt = TryReconnect();
+                if (!attempt) return null;
+
+                try
+                {
+                    await conn.OpenAsync();
+                }
+                catch (SqlException sqex)
+                {
+                    noConnection = true;
+                    lastConnectAttempt = DateTime.UtcNow;
+
+                    FailoverWrite(new ExceptionWithCapturedContext(sqex, isHandled: true));
+                }
 
                 // Create the exException record if it does not exist:
                 var tskGetPolicy = ExecReader(
@@ -446,14 +299,14 @@ SET @exInstanceID = SCOPE_IDENTITY();",
                         AddParameterOut(prms, "@exInstanceID", SqlDbType.Int);
                         AddParameterWithSize(prms, "@exExceptionID", SqlDbType.Binary, 20, ctx.ExceptionID);
                         AddParameter(prms, "@loggedTimeUTC", SqlDbType.DateTime2, ctx.LoggedTimeUTC);
-                        AddParameter(prms, "@isHandled", SqlDbType.Bit, ctx.Thrown.IsHandled);
-                        AddParameter(prms, "@correlationID", SqlDbType.UniqueIdentifier, AsDBNull(ctx.Thrown.CorrelationID));
-                        AddParameterWithSize(prms, "@message", SqlDbType.NVarChar, 256, ctx.Thrown.Exception.Message);
+                        AddParameter(prms, "@isHandled", SqlDbType.Bit, ctx.IsHandled);
+                        AddParameter(prms, "@correlationID", SqlDbType.UniqueIdentifier, AsDBNull(ctx.CorrelationID));
+                        AddParameterWithSize(prms, "@message", SqlDbType.NVarChar, 256, ctx.Exception.Message);
                         AddParameterWithSize(prms, "@applicationName", SqlDbType.VarChar, 96, cfg.ApplicationName);
                         AddParameterWithSize(prms, "@environmentName", SqlDbType.VarChar, 96, cfg.EnvironmentName);
                         AddParameterWithSize(prms, "@machineName", SqlDbType.VarChar, 64, cfg.MachineName);
                         AddParameterWithSize(prms, "@processPath", SqlDbType.NVarChar, 256, cfg.ProcessPath);
-                        AddParameterWithSize(prms, "@executingAssemblyName", SqlDbType.NVarChar, 256, ctx.Thrown.Exception.TargetSite.DeclaringType.Assembly.FullName);
+                        AddParameterWithSize(prms, "@executingAssemblyName", SqlDbType.NVarChar, 256, ctx.Exception.TargetSite.DeclaringType.Assembly.FullName);
                         AddParameter(prms, "@managedThreadId", SqlDbType.Int, ctx.ManagedThreadID);
                         AddParameterWithSize(prms, "@applicationIdentity", SqlDbType.NVarChar, 128, cfg.ApplicationIdentity);
                     },
@@ -466,41 +319,47 @@ SET @exInstanceID = SCOPE_IDENTITY();",
                 // Await the exception policy result:
                 var policy = await tskGetPolicy;
 
+#if false
                 // If logging the method context is enabled and we have a stack trace to work with, log it:
                 Task tskLoggingMethod = null;
-                if (policy.LogStackContext && ctx.Thrown.StackTrace != null)
+                if (policy.LogStackContext && ctx.StackTrace != null)
                 {
                     tskLoggingMethod = LogStackContext(conn, ctx, exInstanceID);
                 }
+#endif
 
                 // If logging the web context is enabled and we have a web context to work with, log it:
                 Task tskLoggingWeb = null;
-                if (policy.LogWebContext && ctx.Thrown.CapturedHttpContext != null)
+                if (policy.LogWebContext && ctx.CapturedHttpContext != null)
                 {
                     tskLoggingWeb = LogWebContext(conn, ctx, exInstanceID);
                 }
 
                 // Wait for any outstanding logging tasks:
+#if false
                 if (tskLoggingMethod != null) await tskLoggingMethod;
+#endif
                 if (tskLoggingWeb != null) await tskLoggingWeb;
 
                 return new Tuple<byte[], int>(ctx.ExceptionID, exInstanceID);
             }
         }
 
-        async Task LogStackContext(SqlConnection conn, ThrownExceptionContext ctx, int exInstanceID)
+#if false
+        async Task LogStackContext(SqlConnection conn, ExceptionWithCapturedContext ctx, int exInstanceID)
         {
             // We require a StackTrace instance:
-            if (ctx.Thrown.StackTrace == null)
+            if (ctx.StackTrace == null)
                 return;
 
-            // TODO
+            // TODO(jsd): Figure out how to capture parameter values, if possible.
         }
+#endif
 
-        async Task LogWebContext(SqlConnection conn, ThrownExceptionContext ctx, int exInstanceID)
+        async Task LogWebContext(SqlConnection conn, ExceptionWithCapturedContext ctx, int exInstanceID)
         {
-            var http = ctx.Thrown.CapturedHttpContext;
-            var host = ctx.Thrown.WebHostingContext;
+            var http = ctx.CapturedHttpContext;
+            var host = ctx.WebHostingContext;
 
             // We require both HTTP and Host context:
             if (http == null || host == null)
@@ -764,7 +623,7 @@ WHEN NOT MATCHED THEN
 
         #endregion
 
-        static byte[] SHA1Hash(string p)
+        internal static byte[] SHA1Hash(string p)
         {
             using (var sha1 = System.Security.Cryptography.SHA1Managed.Create())
                 return sha1.ComputeHash(new UTF8Encoding(false).GetBytes(p));
@@ -772,40 +631,28 @@ WHEN NOT MATCHED THEN
 
         const string nl = "\n";
 
-        static void Format(Exception ex, StringBuilder sb, int indent)
+        static string IndentString(int indent)
         {
-            if (ex == null) return;
+            return new string(' ', indent * 2);
+        }
 
-            string indentStr = new string(' ', indent * 2);
+        static void Format(ExceptionWithCapturedContext ctx, StringBuilder sb, int indent)
+        {
+            if (ctx == null) return;
+
+            string indentStr = IndentString(indent);
             string nlIndent = nl + indentStr;
-            string indent2Str = new string(' ', (indent + 1) * 2);
-            string nlIndent2 = nl + indent2Str;
             sb.Append(indentStr);
 
-            SymptomaticException symp;
-            if ((symp = ex as SymptomaticException) != null)
-            {
-                sb.Append("SymptomaticException:");
-                sb.Append(nlIndent2);
-                sb.Append("Actual:");
-                sb.Append(nl);
-                Format(symp.Actual, sb, indent + 2);
-                sb.Append(nlIndent2);
-                sb.Append("Symptom:");
-                sb.Append(nl);
-                Format(symp.Symptom, sb, indent + 2);
-            }
-            else
-            {
-                sb.Append(ex.ToString().Replace("\r\n", nl).Replace(nl, nlIndent));
-            }
+            string tmp = ctx.Exception.ToString().Replace("\r\n", nl).Replace(nl, nlIndent);
+            sb.Append(tmp);
 
-            if (ex.InnerException != null)
+            if (ctx.InnerException != null)
             {
                 sb.Append(nlIndent);
                 sb.Append("Inner:");
                 sb.Append(nl);
-                Format(ex.InnerException, sb, indent + 1);
+                Format(ctx.InnerException, sb, indent + 1);
             }
         }
 

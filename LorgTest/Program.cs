@@ -14,8 +14,7 @@ namespace LorgTest
         /// <summary>
         /// Default exception logger
         /// </summary>
-        static readonly Logger log = Logger.AttemptInitialize(
-            new Logger.Configuration
+        static readonly Logger log = new Logger(Logger.ValidateConfiguration(new Logger.Configuration
             {
                 ConnectionString = new SqlConnectionStringBuilder()
                 {
@@ -26,7 +25,7 @@ namespace LorgTest
                 ApplicationName = "Test",
                 EnvironmentName = "Local",
             }
-        );
+        ));
 
         /// <summary>
         /// Main program
