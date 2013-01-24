@@ -21,7 +21,6 @@ namespace LorgTest
                 {
                     InitialCatalog = "Lorg",
                     DataSource = ".",
-                    AsynchronousProcessing = true,
                     IntegratedSecurity = true,
                 }.ToString(),
                 ApplicationName = "Test",

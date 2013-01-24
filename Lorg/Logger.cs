@@ -60,16 +60,40 @@ namespace Lorg
             }
         }
 
+        public class CapturedHttpContext
+        {
+            internal readonly Uri Url;
+            internal readonly Uri UrlReferrer;
+            internal readonly System.Security.Principal.IPrincipal User;
+            internal readonly string HttpMethod;
+
+            public CapturedHttpContext(System.Web.HttpContextBase httpContext)
+            {
+                Url = httpContext.Request.Url;
+                UrlReferrer = httpContext.Request.UrlReferrer;
+                User = httpContext.User;
+                HttpMethod = httpContext.Request.HttpMethod;
+            }
+
+            public CapturedHttpContext(System.Web.HttpContext httpContext)
+            {
+                Url = httpContext.Request.Url;
+                UrlReferrer = httpContext.Request.UrlReferrer;
+                User = httpContext.User;
+                HttpMethod = httpContext.Request.HttpMethod;
+            }
+        }
+
         /// <summary>
         /// Represents a thrown exception and some context.
         /// </summary>
-        public struct ThrownException
+        public class ExceptionThreadContext
         {
             internal readonly Exception Exception;
             internal readonly bool IsHandled;
             internal readonly Guid? CorrelationID;
             internal readonly StackTrace StackTrace;
-            internal readonly System.Web.HttpContext HttpContext;
+            internal readonly CapturedHttpContext CapturedHttpContext;
             internal readonly WebHostingContext WebHostingContext;
 
             /// <summary>
@@ -81,14 +105,21 @@ namespace Lorg
             /// <param name="stackTrace">The stack trace (only used for method context logging; detailed parameters).</param>
             /// <param name="httpContext">The current HTTP context being handled, if applicable.</param>
             /// <param name="webHostingContext">The current web application hosting context, if applicable.</param>
-            public ThrownException(Exception ex, bool isHandled = false, Guid? correlationID = null, StackTrace stackTrace = null, System.Web.HttpContext httpContext = null, WebHostingContext webHostingContext = null)
+            public ExceptionThreadContext(
+                Exception ex,
+                bool isHandled = false,
+                Guid? correlationID = null,
+                StackTrace stackTrace = null,
+                WebHostingContext webHostingContext = null,
+                CapturedHttpContext capturedHttpContext = null
+            )
             {
                 Exception = ex;
                 IsHandled = isHandled;
                 CorrelationID = correlationID;
                 StackTrace = stackTrace;
-                HttpContext = httpContext;
                 WebHostingContext = webHostingContext;
+                CapturedHttpContext = capturedHttpContext;
             }
         }
 
@@ -187,7 +218,7 @@ namespace Lorg
         /// Write the exception to the database.
         /// </summary>
         /// <returns></returns>
-        public async Task Write(ThrownException thrown)
+        public async Task Write(ExceptionThreadContext thrown)
         {
             var ctx = GetContext(thrown);
             bool failureMode = noConnection;
@@ -243,7 +274,14 @@ namespace Lorg
 
             if (exToLog != null)
             {
-                await Write(new ThrownException(exToLog, isHandled, correlationID, stackTrace, System.Web.HttpContext.Current, CurrentWebHost));
+                await Write(new ExceptionThreadContext(
+                    exToLog,
+                    isHandled,
+                    correlationID,
+                    stackTrace,
+                    CurrentWebHost,
+                    new CapturedHttpContext(System.Web.HttpContext.Current)
+                ));
             }
         }
 
@@ -274,7 +312,7 @@ namespace Lorg
 
         struct ThrownExceptionContext
         {
-            internal readonly ThrownException Thrown;
+            internal readonly ExceptionThreadContext Thrown;
 
             internal readonly byte[] ExceptionID;
             internal readonly string AssemblyName;
@@ -286,7 +324,7 @@ namespace Lorg
             internal readonly int SequenceNumber;
 
             internal ThrownExceptionContext(
-                ThrownException thrown,
+                ExceptionThreadContext thrown,
                 byte[] exceptionID,
                 string assemblyName,
                 string typeName,
@@ -307,7 +345,7 @@ namespace Lorg
             }
         }
 
-        ThrownExceptionContext GetContext(ThrownException thrown)
+        ThrownExceptionContext GetContext(ExceptionThreadContext thrown)
         {
             var exType = thrown.Exception.GetType();
             var typeName = exType.FullName;
@@ -437,7 +475,7 @@ SET @exInstanceID = SCOPE_IDENTITY();",
 
                 // If logging the web context is enabled and we have a web context to work with, log it:
                 Task tskLoggingWeb = null;
-                if (policy.LogWebContext && ctx.Thrown.HttpContext != null)
+                if (policy.LogWebContext && ctx.Thrown.CapturedHttpContext != null)
                 {
                     tskLoggingWeb = LogWebContext(conn, ctx, exInstanceID);
                 }
@@ -461,7 +499,7 @@ SET @exInstanceID = SCOPE_IDENTITY();",
 
         async Task LogWebContext(SqlConnection conn, ThrownExceptionContext ctx, int exInstanceID)
         {
-            var http = ctx.Thrown.HttpContext;
+            var http = ctx.Thrown.CapturedHttpContext;
             var host = ctx.Thrown.WebHostingContext;
 
             // We require both HTTP and Host context:
@@ -474,10 +512,16 @@ SET @exInstanceID = SCOPE_IDENTITY();",
                 authUserName = http.User.Identity.Name;
 
             // Log URLs first:
-            byte[] requestURLQueryID = await LogURLQuery(conn, http.Request.Url);
-            byte[] referrerURLQueryID = null;
-            if (http.Request.UrlReferrer != null)
-                referrerURLQueryID = await LogURLQuery(conn, http.Request.UrlReferrer);
+            Task<byte[]> tskRequestURL, tskReferrerURL;
+
+            tskRequestURL = LogURLQuery(conn, http.Url);
+            if (http.UrlReferrer != null)
+                tskReferrerURL = LogURLQuery(conn, http.UrlReferrer);
+            else
+                tskReferrerURL = null;
+
+            byte[] requestURLQueryID = await tskRequestURL;
+            byte[] referrerURLQueryID = tskReferrerURL == null ? null : await tskReferrerURL;
 
             // Log the web context:
             await ExecNonQuery(
@@ -495,12 +539,11 @@ VALUES (@exInstanceID,  @ApplicationID,  @ApplicationPhysicalPath,  @Application
                     AddParameterWithSize(prms, "@SiteName", SqlDbType.VarChar, 96, host.SiteName);
                     // Request details:
                     AddParameterWithSize(prms, "@AuthenticatedUserName", SqlDbType.VarChar, 96, AsDBNull(authUserName));
-                    AddParameterWithSize(prms, "@HttpVerb", SqlDbType.VarChar, 16, http.Request.HttpMethod);
+                    AddParameterWithSize(prms, "@HttpVerb", SqlDbType.VarChar, 16, http.HttpMethod);
                     AddParameterWithSize(prms, "@RequestURL", SqlDbType.Binary, 20, requestURLQueryID);
                     AddParameterWithSize(prms, "@ReferrerURL", SqlDbType.Binary, 20, AsDBNull(referrerURLQueryID));
                 }
             );
-
         }
 
         static byte[] GetURLID(Uri uri)
@@ -529,9 +572,12 @@ VALUES (@exInstanceID,  @ApplicationID,  @ApplicationPhysicalPath,  @Application
 
             await ExecNonQuery(
                 conn,
-@"INSERT INTO [dbo].[exURL]
-       ([exURLID], [HostName], [PortNumber], [AbsolutePath], [Scheme])
-VALUES (@exURLID,  @HostName,  @PortNumber,  @AbsolutePath,  @Scheme);",
+@"MERGE [dbo].[exURL] AS target
+USING (SELECT @exURLID) AS source (exURLID)
+ON (target.exURLID = source.exURLID)
+WHEN NOT MATCHED THEN
+   INSERT ([exURLID], [HostName], [PortNumber], [AbsolutePath], [Scheme])
+   VALUES (@exURLID,  @HostName,  @PortNumber,  @AbsolutePath,  @Scheme);",
                 prms =>
                 {
                     AddParameterWithSize(prms, "@exURLID", SqlDbType.Binary, 20, urlID);
@@ -562,9 +608,12 @@ VALUES (@exURLID,  @HostName,  @PortNumber,  @AbsolutePath,  @Scheme);",
             // Store the exURLQuery record:
             await ExecNonQuery(
                 conn,
-@"INSERT INTO [dbo].[exURLQuery]
-       ([exURLQueryID], [exURLID], [QueryString])
-VALUES (@exURLQueryID,  @exURLID,  @QueryString);",
+@"MERGE [dbo].[exURLQuery] AS target
+USING (SELECT @exURLQueryID) AS source (exURLQueryID)
+ON (target.exURLQueryID = source.exURLQueryID)
+WHEN NOT MATCHED THEN
+    INSERT ([exURLQueryID], [exURLID], [QueryString])
+    VALUES (@exURLQueryID,  @exURLID,  @QueryString);",
                 prms =>
                 {
                     AddParameterWithSize(prms, "@exURLQueryID", SqlDbType.Binary, 20, urlQueryID);
