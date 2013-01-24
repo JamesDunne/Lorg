@@ -13,6 +13,7 @@ namespace LorgMvcTest
 
         public void OnException(ExceptionContext filterContext)
         {
+            // Capture the thread-specific bits first before we jump into async execution:
             var context = new Lorg.Logger.ExceptionThreadContext(
                 filterContext.Exception,
                 isHandled: false,
@@ -22,12 +23,16 @@ namespace LorgMvcTest
                 capturedHttpContext: new Lorg.Logger.CapturedHttpContext(filterContext.HttpContext)
             );
 
+            // Run the exception logger asynchronously:
             Task.Run(async () =>
             {
                 await ExceptionLogger.Log.Write(context);
             });
 
+            // Mark the exception as handled:
             filterContext.ExceptionHandled = true;
+
+            // TODO: still need to produce a result!
         }
     }
 }

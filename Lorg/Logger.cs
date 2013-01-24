@@ -511,20 +511,12 @@ SET @exInstanceID = SCOPE_IDENTITY();",
             if (http.User != null && http.User.Identity != null)
                 authUserName = http.User.Identity.Name;
 
-            // Log URLs first:
-            Task<byte[]> tskRequestURL, tskReferrerURL;
-
-            tskRequestURL = LogURLQuery(conn, http.Url);
-            if (http.UrlReferrer != null)
-                tskReferrerURL = LogURLQuery(conn, http.UrlReferrer);
-            else
-                tskReferrerURL = null;
-
-            byte[] requestURLQueryID = await tskRequestURL;
-            byte[] referrerURLQueryID = tskReferrerURL == null ? null : await tskReferrerURL;
+            // Compute the URL IDs:
+            byte[] requestURLQueryID = CalcURLQueryID(http.Url);
+            byte[] referrerURLQueryID = http.UrlReferrer == null ? null : CalcURLQueryID(http.UrlReferrer);
 
             // Log the web context:
-            await ExecNonQuery(
+            var tskContextWeb = ExecNonQuery(
                 conn,
 @"INSERT INTO [dbo].[exContextWeb]
        ([exInstanceID], [ApplicationID], [ApplicationPhysicalPath], [ApplicationVirtualPath], [SiteName], [AuthenticatedUserName], [HttpVerb], [RequestURL], [ReferrerURL])
@@ -544,20 +536,19 @@ VALUES (@exInstanceID,  @ApplicationID,  @ApplicationPhysicalPath,  @Application
                     AddParameterWithSize(prms, "@ReferrerURL", SqlDbType.Binary, 20, AsDBNull(referrerURLQueryID));
                 }
             );
-        }
 
-        static byte[] GetURLID(Uri uri)
-        {
-            byte[] id = SHA1Hash("{0}://{1}:{2}{3}".F(uri.Scheme, uri.Host, uri.Port, uri.AbsolutePath));
-            Debug.Assert(id.Length == 20);
-            return id;
-        }
+            // Log the URLs:
+            Task tskRequestURL, tskReferrerURL;
+            tskRequestURL = LogURLQuery(conn, http.Url);
+            if (http.UrlReferrer != null)
+                tskReferrerURL = LogURLQuery(conn, http.UrlReferrer);
+            else
+                tskReferrerURL = null;
 
-        static byte[] GetURLQueryID(Uri uri)
-        {
-            byte[] id = SHA1Hash("{0}://{1}:{2}{3}{4}".F(uri.Scheme, uri.Host, uri.Port, uri.AbsolutePath, uri.Query));
-            Debug.Assert(id.Length == 20);
-            return id;
+            // Await the completion of the tasks:
+            await tskRequestURL;
+            if (tskReferrerURL != null) await tskReferrerURL;
+            await tskContextWeb;
         }
 
         /// <summary>
@@ -566,9 +557,9 @@ VALUES (@exInstanceID,  @ApplicationID,  @ApplicationPhysicalPath,  @Application
         /// <param name="conn"></param>
         /// <param name="uri"></param>
         /// <returns></returns>
-        async Task<byte[]> LogURL(SqlConnection conn, Uri uri)
+        async Task LogURL(SqlConnection conn, Uri uri)
         {
-            byte[] urlID = GetURLID(uri);
+            byte[] urlID = CalcURLID(uri);
 
             await ExecNonQuery(
                 conn,
@@ -587,8 +578,6 @@ WHEN NOT MATCHED THEN
                     AddParameterWithSize(prms, "@Scheme", SqlDbType.VarChar, 8, uri.Scheme);
                 }
             );
-
-            return urlID;
         }
 
         /// <summary>
@@ -597,16 +586,19 @@ WHEN NOT MATCHED THEN
         /// <param name="conn"></param>
         /// <param name="uri"></param>
         /// <returns></returns>
-        async Task<byte[]> LogURLQuery(SqlConnection conn, Uri uri)
+        async Task LogURLQuery(SqlConnection conn, Uri uri)
         {
             // Log the base URL:
-            byte[] urlID = await LogURL(conn, uri);
+            byte[] urlID = CalcURLID(uri);
 
             // Compute the URLQueryID:
-            byte[] urlQueryID = GetURLQueryID(uri);
+            byte[] urlQueryID = CalcURLQueryID(uri);
+
+            // Store the exURL record:
+            var tskLogURL = LogURL(conn, uri);
 
             // Store the exURLQuery record:
-            await ExecNonQuery(
+            var tskLogURLQuery = ExecNonQuery(
                 conn,
 @"MERGE [dbo].[exURLQuery] AS target
 USING (SELECT @exURLQueryID) AS source (exURLQueryID)
@@ -622,7 +614,22 @@ WHEN NOT MATCHED THEN
                 }
             );
 
-            return urlQueryID;
+            await tskLogURLQuery;
+            await tskLogURL;
+        }
+
+        static byte[] CalcURLID(Uri uri)
+        {
+            byte[] id = SHA1Hash("{0}://{1}:{2}{3}".F(uri.Scheme, uri.Host, uri.Port, uri.AbsolutePath));
+            Debug.Assert(id.Length == 20);
+            return id;
+        }
+
+        static byte[] CalcURLQueryID(Uri uri)
+        {
+            byte[] id = SHA1Hash("{0}://{1}:{2}{3}{4}".F(uri.Scheme, uri.Host, uri.Port, uri.AbsolutePath, uri.Query));
+            Debug.Assert(id.Length == 20);
+            return id;
         }
 
         #region Database helper methods
