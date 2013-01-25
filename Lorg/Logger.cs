@@ -370,10 +370,9 @@ SET @exInstanceID = SCOPE_IDENTITY();",
             if (http.User != null && http.User.Identity != null)
                 authUserName = http.User.Identity.Name;
 
-            // Compute the URL IDs:
+            // Compute the IDs:
             byte[] requestURLQueryID = CalcURLQueryID(http.Url);
             byte[] referrerURLQueryID = http.UrlReferrer == null ? null : CalcURLQueryID(http.UrlReferrer);
-
             byte[] exWebApplicationID = CalcWebApplicationID(host);
 
             var tskWebApplication = ExecNonQuery(
