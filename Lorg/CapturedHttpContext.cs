@@ -19,6 +19,7 @@ namespace Lorg
             UrlReferrer = httpContext.Request.UrlReferrer;
             User = httpContext.User;
             HttpMethod = httpContext.Request.HttpMethod;
+            Headers = new System.Collections.Specialized.NameValueCollection(httpContext.Request.Headers);
         }
 
         public CapturedHttpContext(System.Web.HttpContext httpContext)
@@ -27,7 +28,10 @@ namespace Lorg
             UrlReferrer = httpContext.Request.UrlReferrer;
             User = httpContext.User;
             HttpMethod = httpContext.Request.HttpMethod;
+            Headers = new System.Collections.Specialized.NameValueCollection(httpContext.Request.Headers);
         }
+
+        public System.Collections.Specialized.NameValueCollection Headers { get; set; }
     }
 
 }

@@ -1,3 +1,5 @@
+DELETE FROM [dbo].[exCollectionKeyValue]
+DELETE FROM [dbo].[exCollectionValue]
 DELETE FROM [dbo].[exURLQuery]
 DELETE FROM [dbo].[exURL]
 DELETE FROM [dbo].[exWebApplication]

@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Collections.Specialized;
 using System.Data;
 using System.Data.SqlClient;
 using System.Diagnostics;
@@ -210,26 +211,26 @@ namespace Lorg
         class ExceptionPolicy
         {
             /// <summary>
-            /// Determines whether or not stack frames are logged in detail.
-            /// </summary>
-            public bool LogStackContext { get; private set; }
-            /// <summary>
             /// Determines whether or not web context details are logged.
             /// </summary>
             public bool LogWebContext { get; private set; }
+            /// <summary>
+            /// Determines whether or not web context details are logged.
+            /// </summary>
+            public bool LogWebRequestHeaders { get; private set; }
 
-            public ExceptionPolicy(bool logStackContext, bool logWebContext)
+            public ExceptionPolicy(bool logWebContext, bool logWebRequestHeaders)
             {
-                LogStackContext = logStackContext;
                 LogWebContext = logWebContext;
+                LogWebRequestHeaders = logWebRequestHeaders;
             }
 
             /// <summary>
             /// Default exception-handling policy.
             /// </summary>
             public static ExceptionPolicy Default = new ExceptionPolicy(
-                logStackContext: false,
-                logWebContext: true
+                logWebContext: true,
+                logWebRequestHeaders: true
             );
         }
 
@@ -268,7 +269,7 @@ WHEN NOT MATCHED THEN
     INSERT ([exExceptionID], [AssemblyName], [TypeName], [StackTrace])
     VALUES (@exExceptionID, @assemblyName, @typeName, @stackTrace);
 
-SELECT [LogStackContext], [LogWebContext]
+SELECT [LogWebContext], [LogWebRequestHeaders]
 FROM [dbo].[exExceptionPolicy] WITH (NOLOCK)
 WHERE exExceptionID = @exExceptionID;",
                     prms =>
@@ -283,8 +284,8 @@ WHERE exExceptionID = @exExceptionID;",
                         !await dr.ReadAsync()
                         ? ExceptionPolicy.Default
                         : new ExceptionPolicy(
-                            logStackContext: dr.GetBoolean(dr.GetOrdinal("LogStackContext")),
-                            logWebContext: dr.GetBoolean(dr.GetOrdinal("LogWebContext"))
+                            logWebContext: dr.GetBoolean(dr.GetOrdinal("LogWebContext")),
+                            logWebRequestHeaders: dr.GetBoolean(dr.GetOrdinal("LogWebRequestHeaders"))
                         )
                 );
 
@@ -319,44 +320,21 @@ SET @exInstanceID = SCOPE_IDENTITY();",
                 // Await the exception policy result:
                 var policy = await tskGetPolicy;
 
-#if false
-                // If logging the method context is enabled and we have a stack trace to work with, log it:
-                Task tskLoggingMethod = null;
-                if (policy.LogStackContext && ctx.StackTrace != null)
-                {
-                    tskLoggingMethod = LogStackContext(conn, ctx, exInstanceID);
-                }
-#endif
-
                 // If logging the web context is enabled and we have a web context to work with, log it:
                 Task tskLoggingWeb = null;
                 if (policy.LogWebContext && ctx.CapturedHttpContext != null)
                 {
-                    tskLoggingWeb = LogWebContext(conn, ctx, exInstanceID);
+                    tskLoggingWeb = LogWebContext(conn, policy, ctx, exInstanceID);
                 }
 
                 // Wait for any outstanding logging tasks:
-#if false
-                if (tskLoggingMethod != null) await tskLoggingMethod;
-#endif
                 if (tskLoggingWeb != null) await tskLoggingWeb;
 
                 return new Tuple<byte[], int>(ctx.ExceptionID, exInstanceID);
             }
         }
 
-#if false
-        async Task LogStackContext(SqlConnection conn, ExceptionWithCapturedContext ctx, int exInstanceID)
-        {
-            // We require a StackTrace instance:
-            if (ctx.StackTrace == null)
-                return;
-
-            // TODO(jsd): Figure out how to capture parameter values, if possible.
-        }
-#endif
-
-        async Task LogWebContext(SqlConnection conn, ExceptionWithCapturedContext ctx, int exInstanceID)
+        async Task LogWebContext(SqlConnection conn, ExceptionPolicy policy, ExceptionWithCapturedContext ctx, int exInstanceID)
         {
             var http = ctx.CapturedHttpContext;
             var host = ctx.WebHostingContext;
@@ -375,6 +353,7 @@ SET @exInstanceID = SCOPE_IDENTITY();",
             byte[] referrerURLQueryID = http.UrlReferrer == null ? null : CalcURLQueryID(http.UrlReferrer);
             byte[] exWebApplicationID = CalcWebApplicationID(host);
 
+            // Log the web application details:
             var tskWebApplication = ExecNonQuery(
                 conn,
 @"MERGE [dbo].[exWebApplication] AS target
@@ -394,12 +373,23 @@ WHEN NOT MATCHED THEN
                 }
             );
 
+            // Log the request headers collection, if requested and available:
+            Task tskCollection = null;
+            byte[] exCollectionID = null;
+            if (policy.LogWebRequestHeaders && http.Headers != null)
+            {
+                // Compute the collection hash (must be done BEFORE `tskContextWeb`):
+                exCollectionID = CalcCollectionID(http.Headers);
+                // Store all records for the headers collection:
+                tskCollection = LogCollection(conn, exCollectionID, http.Headers);
+            }
+
             // Log the web context:
             var tskContextWeb = ExecNonQuery(
                 conn,
 @"INSERT INTO [dbo].[exContextWeb]
-       ([exInstanceID], [exWebApplicationID], [AuthenticatedUserName], [HttpVerb], [RequestURLQueryID], [ReferrerURLQueryID])
-VALUES (@exInstanceID,  @exWebApplicationID,  @AuthenticatedUserName,  @HttpVerb,  @RequestURLQueryID,  @ReferrerURLQueryID);",
+       ([exInstanceID], [exWebApplicationID], [AuthenticatedUserName], [HttpVerb], [RequestURLQueryID], [ReferrerURLQueryID], [RequestHeadersCollectionID])
+VALUES (@exInstanceID,  @exWebApplicationID,  @AuthenticatedUserName,  @HttpVerb,  @RequestURLQueryID,  @ReferrerURLQueryID,  @RequestHeadersCollectionID);",
                 prms =>
                 {
                     AddParameter(prms, "@exInstanceID", SqlDbType.Int, exInstanceID);
@@ -410,6 +400,7 @@ VALUES (@exInstanceID,  @exWebApplicationID,  @AuthenticatedUserName,  @HttpVerb
                     AddParameterWithSize(prms, "@HttpVerb", SqlDbType.VarChar, 16, http.HttpMethod);
                     AddParameterWithSize(prms, "@RequestURLQueryID", SqlDbType.Binary, 20, requestURLQueryID);
                     AddParameterWithSize(prms, "@ReferrerURLQueryID", SqlDbType.Binary, 20, AsDBNull(referrerURLQueryID));
+                    AddParameterWithSize(prms, "@RequestHeadersCollectionID", SqlDbType.Binary, 20, AsDBNull(exCollectionID));
                 }
             );
 
@@ -426,6 +417,22 @@ VALUES (@exInstanceID,  @exWebApplicationID,  @AuthenticatedUserName,  @HttpVerb
             if (tskReferrerURL != null) await tskReferrerURL;
             await tskWebApplication;
             await tskContextWeb;
+            if (tskCollection != null) await tskCollection;
+        }
+
+        private byte[] CalcCollectionID(NameValueCollection coll)
+        {
+            // Guesstimate the capacity required (40 chars per name/value pair):
+            var sb = new StringBuilder(coll.Count * 40);
+
+            // Compute the hash of the collection as a series of name-ordered "{name}:{value}\n" strings:
+            foreach (string name in coll.AllKeys.OrderBy(k => k))
+            {
+                sb.AppendFormat("{0}:{1}\n", name, coll.Get(name));
+            }
+
+            byte[] id = SHA1Hash(sb.ToString());
+            return id;
         }
 
         static byte[] CalcWebApplicationID(WebHostingContext host)
@@ -442,17 +449,31 @@ VALUES (@exInstanceID,  @exWebApplicationID,  @AuthenticatedUserName,  @HttpVerb
             return id;
         }
 
+        static byte[] CalcURLID(Uri uri)
+        {
+            byte[] id = SHA1Hash("{0}://{1}:{2}{3}".F(uri.Scheme, uri.Host, uri.Port, uri.AbsolutePath));
+            Debug.Assert(id.Length == 20);
+            return id;
+        }
+
+        static byte[] CalcURLQueryID(Uri uri)
+        {
+            byte[] id = SHA1Hash("{0}://{1}:{2}{3}{4}".F(uri.Scheme, uri.Host, uri.Port, uri.AbsolutePath, uri.Query));
+            Debug.Assert(id.Length == 20);
+            return id;
+        }
+
         /// <summary>
         /// Writes a URL without query-string to the exURL table.
         /// </summary>
         /// <param name="conn"></param>
         /// <param name="uri"></param>
         /// <returns></returns>
-        async Task LogURL(SqlConnection conn, Uri uri)
+        Task LogURL(SqlConnection conn, Uri uri)
         {
             byte[] urlID = CalcURLID(uri);
 
-            await ExecNonQuery(
+            return ExecNonQuery(
                 conn,
 @"MERGE [dbo].[exURL] AS target
 USING (SELECT @exURLID) AS source (exURLID)
@@ -509,18 +530,98 @@ WHEN NOT MATCHED THEN
             await tskLogURL;
         }
 
-        static byte[] CalcURLID(Uri uri)
+        /// <summary>
+        /// Logs all name/value pairs as a single collection using concurrent MERGE statements.
+        /// </summary>
+        /// <param name="conn"></param>
+        /// <param name="exCollectionID"></param>
+        /// <param name="coll"></param>
+        /// <returns></returns>
+        Task LogCollection(SqlConnection conn, byte[] exCollectionID, NameValueCollection coll)
         {
-            byte[] id = SHA1Hash("{0}://{1}:{2}{3}".F(uri.Scheme, uri.Host, uri.Port, uri.AbsolutePath));
-            Debug.Assert(id.Length == 20);
-            return id;
+            // The exCollectionID should be pre-calculated by `CalcCollectionID`.
+
+            const int numTasksPerPair = 2;
+
+            // Create an array of tasks to wait upon:
+            var tasks = new Task[coll.Count * numTasksPerPair];
+
+            // Fill out the array of tasks with concurrent MERGE statements for each name/value pair:
+            for (int i = 0; i < coll.Count; ++i)
+            {
+                string name = coll.GetKey(i);
+                string value = coll.Get(i);
+
+                byte[] exCollectionValueID = SHA1Hash(value);
+
+                // Merge the Value record:
+                tasks[i * numTasksPerPair + 0] = ExecNonQuery(
+                    conn,
+@"MERGE [dbo].[exCollectionValue] AS target
+USING (SELECT @exCollectionValueID) AS source (exCollectionValueID)
+ON (target.exCollectionValueID = source.exCollectionValueID)
+WHEN NOT MATCHED THEN
+    INSERT ([exCollectionValueID], [Value])
+    VALUES (@exCollectionValueID,  @Value);",
+                    prms =>
+                    {
+                        AddParameterWithSize(prms, "@exCollectionValueID", SqlDbType.Binary, 20, exCollectionValueID);
+                        AddParameterWithSize(prms, "@Value", SqlDbType.VarChar, -1, value);
+                    }
+                );
+
+                // Merge the Name-Value record:
+                tasks[i * numTasksPerPair + 1] = ExecNonQuery(
+                    conn,
+@"MERGE [dbo].[exCollectionKeyValue] AS target
+USING (SELECT @exCollectionID, @Name, @exCollectionValueID) AS source (exCollectionID, Name, exCollectionValueID)
+ON (target.exCollectionID = source.exCollectionID AND target.Name = source.Name AND target.exCollectionValueID = source.exCollectionValueID)
+WHEN NOT MATCHED THEN
+    INSERT ([exCollectionID], [Name], [exCollectionValueID])
+    VALUES (@exCollectionID,  @Name,  @exCollectionValueID);",
+                    prms =>
+                    {
+                        AddParameterWithSize(prms, "@exCollectionID", SqlDbType.Binary, 20, exCollectionID);
+                        AddParameterWithSize(prms, "@Name", SqlDbType.VarChar, 96, name);
+                        AddParameterWithSize(prms, "@exCollectionValueID", SqlDbType.Binary, 20, exCollectionValueID);
+                    }
+                );
+            }
+            // Our final task's completion depends on all the tasks created thus far:
+            return Task.WhenAll(tasks);
         }
 
-        static byte[] CalcURLQueryID(Uri uri)
+        internal static byte[] SHA1Hash(string p)
         {
-            byte[] id = SHA1Hash("{0}://{1}:{2}{3}{4}".F(uri.Scheme, uri.Host, uri.Port, uri.AbsolutePath, uri.Query));
-            Debug.Assert(id.Length == 20);
-            return id;
+            using (var sha1 = System.Security.Cryptography.SHA1Managed.Create())
+                return sha1.ComputeHash(new UTF8Encoding(false).GetBytes(p));
+        }
+
+        const string nl = "\n";
+
+        static string IndentString(int indent)
+        {
+            return new string(' ', indent * 2);
+        }
+
+        static void Format(ExceptionWithCapturedContext ctx, StringBuilder sb, int indent)
+        {
+            if (ctx == null) return;
+
+            string indentStr = IndentString(indent);
+            string nlIndent = nl + indentStr;
+            sb.Append(indentStr);
+
+            string tmp = ctx.Exception.ToString().Replace("\r\n", nl).Replace(nl, nlIndent);
+            sb.Append(tmp);
+
+            if (ctx.InnerException != null)
+            {
+                sb.Append(nlIndent);
+                sb.Append("Inner:");
+                sb.Append(nl);
+                Format(ctx.InnerException, sb, indent + 1);
+            }
         }
 
         #region Database helper methods
@@ -654,39 +755,6 @@ WHEN NOT MATCHED THEN
         }
 
         #endregion
-
-        internal static byte[] SHA1Hash(string p)
-        {
-            using (var sha1 = System.Security.Cryptography.SHA1Managed.Create())
-                return sha1.ComputeHash(new UTF8Encoding(false).GetBytes(p));
-        }
-
-        const string nl = "\n";
-
-        static string IndentString(int indent)
-        {
-            return new string(' ', indent * 2);
-        }
-
-        static void Format(ExceptionWithCapturedContext ctx, StringBuilder sb, int indent)
-        {
-            if (ctx == null) return;
-
-            string indentStr = IndentString(indent);
-            string nlIndent = nl + indentStr;
-            sb.Append(indentStr);
-
-            string tmp = ctx.Exception.ToString().Replace("\r\n", nl).Replace(nl, nlIndent);
-            sb.Append(tmp);
-
-            if (ctx.InnerException != null)
-            {
-                sb.Append(nlIndent);
-                sb.Append("Inner:");
-                sb.Append(nl);
-                Format(ctx.InnerException, sb, indent + 1);
-            }
-        }
 
         #endregion
     }
