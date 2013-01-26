@@ -11,12 +11,14 @@ namespace LorgMvcTest
     {
         public void OnException(ExceptionContext filterContext)
         {
-            ExceptionLogger.CaptureAndLog(filterContext.Exception, new Lorg.CapturedHttpContext(filterContext.HttpContext));
+            ExceptionLogger.CaptureAndLog(
+                filterContext.Exception,
+                new Lorg.CapturedHttpContext(filterContext.HttpContext),
+                false,
+                null
+            );
 
-            // Mark the exception as handled:
-            filterContext.ExceptionHandled = true;
-
-            // TODO: still need to produce a result!
+            filterContext.ExceptionHandled = false;
         }
     }
 }

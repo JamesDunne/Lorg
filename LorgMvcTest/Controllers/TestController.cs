@@ -25,5 +25,10 @@ namespace LorgMvcTest.Controllers
                 await ExceptionLogger.HandleExceptions(async () => { throw new Exception("Test"); });
             return Content("");
         }
+
+        public async Task<JsonResult> Json()
+        {
+            throw new NotImplementedException();
+        }
     }
 }
