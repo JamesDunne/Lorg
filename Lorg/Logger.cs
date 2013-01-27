@@ -266,16 +266,16 @@ USING (SELECT @exExceptionID) AS source (exExceptionID)
 ON (target.exExceptionID = source.exExceptionID)
 WHEN NOT MATCHED THEN
     INSERT ([exExceptionID], [AssemblyName], [TypeName], [StackTrace])
-    VALUES (@exExceptionID, @assemblyName, @typeName, @stackTrace);
+    VALUES (@exExceptionID,  @AssemblyName,  @TypeName,  @StackTrace );
 
 SELECT [LogWebContext], [LogWebRequestHeaders]
 FROM [dbo].[exExceptionPolicy] WITH (NOLOCK)
 WHERE exExceptionID = @exExceptionID;",
                     prms =>
                         prms.AddInParamSHA1("@exExceptionID", ctx.ExceptionID)
-                            .AddInParamSize("@assemblyName", SqlDbType.NVarChar, 256, ctx.AssemblyName)
-                            .AddInParamSize("@typeName", SqlDbType.NVarChar, 256, ctx.TypeName)
-                            .AddInParamSize("@stackTrace", SqlDbType.NVarChar, -1, ctx.StackTrace),
+                            .AddInParamSize("@AssemblyName", SqlDbType.NVarChar, 256, ctx.AssemblyName)
+                            .AddInParamSize("@TypeName", SqlDbType.NVarChar, 256, ctx.TypeName)
+                            .AddInParamSize("@StackTrace", SqlDbType.NVarChar, -1, ctx.StackTrace),
                     // Read the SELECT result set into an ExceptionPolicy, or use the default policy:
                     async dr =>
                         !await dr.ReadAsync()
@@ -288,23 +288,25 @@ WHERE exExceptionID = @exExceptionID;",
 
                 // Create the instance record:
                 int exInstanceID = await conn.ExecNonQuery(
-@"INSERT INTO [dbo].[exInstance] ([exExceptionID], [LoggedTimeUTC], [IsHandled], [CorrelationID], [Message], [ApplicationName], [EnvironmentName], [MachineName], [ProcessPath], [ExecutingAssemblyName], [ManagedThreadId], [ApplicationIdentity])
-VALUES (@exExceptionID, @loggedTimeUTC, @isHandled, @correlationID, @message, @applicationName, @environmentName, @machineName, @processPath, @executingAssemblyName, @managedThreadId, @applicationIdentity);
+@"INSERT INTO [dbo].[exInstance]
+       ([exExceptionID], [LoggedTimeUTC], [SequenceNumber], [IsHandled], [CorrelationID], [Message], [ApplicationName], [EnvironmentName], [MachineName], [ProcessPath], [ExecutingAssemblyName], [ManagedThreadId], [ApplicationIdentity])
+VALUES (@exExceptionID,  @LoggedTimeUTC,  @SequenceNumber,  @IsHandled,  @CorrelationID,  @Message,  @ApplicationName,  @EnvironmentName,  @MachineName,  @ProcessPath,  @ExecutingAssemblyName,  @ManagedThreadId,  @ApplicationIdentity );
 SET @exInstanceID = SCOPE_IDENTITY();",
                     prms =>
                         prms.AddOutParam("@exInstanceID", SqlDbType.Int)
                             .AddInParamSHA1("@exExceptionID", ctx.ExceptionID)
-                            .AddInParam("@loggedTimeUTC", SqlDbType.DateTime2, ctx.LoggedTimeUTC)
-                            .AddInParam("@isHandled", SqlDbType.Bit, ctx.IsHandled)
-                            .AddInParam("@correlationID", SqlDbType.UniqueIdentifier, ctx.CorrelationID)
-                            .AddInParamSize("@message", SqlDbType.NVarChar, 256, ctx.Exception.Message)
-                            .AddInParamSize("@applicationName", SqlDbType.VarChar, 96, cfg.ApplicationName)
-                            .AddInParamSize("@environmentName", SqlDbType.VarChar, 96, cfg.EnvironmentName)
-                            .AddInParamSize("@machineName", SqlDbType.VarChar, 64, cfg.MachineName)
-                            .AddInParamSize("@processPath", SqlDbType.NVarChar, 256, cfg.ProcessPath)
-                            .AddInParamSize("@executingAssemblyName", SqlDbType.NVarChar, 256, ctx.Exception.TargetSite.DeclaringType.Assembly.FullName)
-                            .AddInParam("@managedThreadId", SqlDbType.Int, ctx.ManagedThreadID)
-                            .AddInParamSize("@applicationIdentity", SqlDbType.NVarChar, 128, cfg.ApplicationIdentity),
+                            .AddInParam("@LoggedTimeUTC", SqlDbType.DateTime2, ctx.LoggedTimeUTC)
+                            .AddInParam("@SequenceNumber", SqlDbType.Int, ctx.SequenceNumber)
+                            .AddInParam("@IsHandled", SqlDbType.Bit, ctx.IsHandled)
+                            .AddInParam("@CorrelationID", SqlDbType.UniqueIdentifier, ctx.CorrelationID)
+                            .AddInParamSize("@Message", SqlDbType.NVarChar, 256, ctx.Exception.Message)
+                            .AddInParamSize("@ApplicationName", SqlDbType.VarChar, 96, cfg.ApplicationName)
+                            .AddInParamSize("@EnvironmentName", SqlDbType.VarChar, 96, cfg.EnvironmentName)
+                            .AddInParamSize("@MachineName", SqlDbType.VarChar, 64, cfg.MachineName)
+                            .AddInParamSize("@ProcessPath", SqlDbType.NVarChar, 256, cfg.ProcessPath)
+                            .AddInParamSize("@ExecutingAssemblyName", SqlDbType.NVarChar, 256, ctx.Exception.TargetSite.DeclaringType.Assembly.FullName)
+                            .AddInParam("@ManagedThreadId", SqlDbType.Int, ctx.ManagedThreadID)
+                            .AddInParamSize("@ApplicationIdentity", SqlDbType.NVarChar, 128, cfg.ApplicationIdentity),
                     (prms, rc) =>
                     {
                         return (int)prms["@exInstanceID"].Value;
@@ -354,7 +356,7 @@ USING (SELECT @exWebApplicationID) AS source (exWebApplicationID)
 ON (target.exWebApplicationID = source.exWebApplicationID)
 WHEN NOT MATCHED THEN
     INSERT ([exWebApplicationID], [MachineName], [ApplicationID], [PhysicalPath], [VirtualPath], [SiteName])
-    VALUES (@exWebApplicationID,  @MachineName,  @ApplicationID,  @PhysicalPath,  @VirtualPath,  @SiteName);",
+    VALUES (@exWebApplicationID,  @MachineName,  @ApplicationID,  @PhysicalPath,  @VirtualPath,  @SiteName );",
                 prms =>
                     prms.AddInParamSHA1("@exWebApplicationID", exWebApplicationID)
                         .AddInParamSize("@MachineName", SqlDbType.NVarChar, 96, host.MachineName)
@@ -379,7 +381,7 @@ WHEN NOT MATCHED THEN
             var tskContextWeb = conn.ExecNonQuery(
 @"INSERT INTO [dbo].[exContextWeb]
        ([exInstanceID], [exWebApplicationID], [AuthenticatedUserName], [HttpVerb], [RequestURLQueryID], [ReferrerURLQueryID], [RequestHeadersCollectionID])
-VALUES (@exInstanceID,  @exWebApplicationID,  @AuthenticatedUserName,  @HttpVerb,  @RequestURLQueryID,  @ReferrerURLQueryID,  @RequestHeadersCollectionID);",
+VALUES (@exInstanceID,  @exWebApplicationID,  @AuthenticatedUserName,  @HttpVerb,  @RequestURLQueryID,  @ReferrerURLQueryID,  @RequestHeadersCollectionID );",
                 prms =>
                     prms.AddInParam("@exInstanceID", SqlDbType.Int, exInstanceID)
                     // Hosting environment:
@@ -467,7 +469,7 @@ USING (SELECT @exURLID) AS source (exURLID)
 ON (target.exURLID = source.exURLID)
 WHEN NOT MATCHED THEN
    INSERT ([exURLID], [HostName], [PortNumber], [AbsolutePath], [Scheme])
-   VALUES (@exURLID,  @HostName,  @PortNumber,  @AbsolutePath,  @Scheme);",
+   VALUES (@exURLID,  @HostName,  @PortNumber,  @AbsolutePath,  @Scheme );",
                 prms =>
                     prms.AddInParamSHA1("@exURLID", urlID)
                         .AddInParamSize("@HostName", SqlDbType.VarChar, 128, uri.Host)
@@ -525,7 +527,7 @@ WHEN NOT MATCHED THEN
 
             // Check if the exCollectionID exists already:
             bool collectionExists = await conn.ExecReader(
-@"SELECT TOP 1 FROM [dbo].[exCollectionKeyValue] WHERE [exCollectionID] = @exCollectionID",
+@"SELECT TOP 1 1 FROM [dbo].[exCollectionKeyValue] WHERE [exCollectionID] = @exCollectionID",
                 prms =>
                     prms.AddInParamSHA1("@exCollectionID", exCollectionID),
                 async dr => await dr.ReadAsync()
@@ -554,7 +556,7 @@ USING (SELECT @exCollectionValueID) AS source (exCollectionValueID)
 ON (target.exCollectionValueID = source.exCollectionValueID)
 WHEN NOT MATCHED THEN
     INSERT ([exCollectionValueID], [Value])
-    VALUES (@exCollectionValueID,  @Value);",
+    VALUES (@exCollectionValueID,  @Value );",
                     prms =>
                         prms.AddInParamSHA1("@exCollectionValueID", exCollectionValueID)
                             .AddInParamSize("@Value", SqlDbType.VarChar, -1, value)
@@ -567,7 +569,7 @@ USING (SELECT @exCollectionID, @Name, @exCollectionValueID) AS source (exCollect
 ON (target.exCollectionID = source.exCollectionID AND target.Name = source.Name AND target.exCollectionValueID = source.exCollectionValueID)
 WHEN NOT MATCHED THEN
     INSERT ([exCollectionID], [Name], [exCollectionValueID])
-    VALUES (@exCollectionID,  @Name,  @exCollectionValueID);",
+    VALUES (@exCollectionID,  @Name,  @exCollectionValueID );",
                     prms =>
                         prms.AddInParamSHA1("@exCollectionID", exCollectionID)
                             .AddInParamSize("@Name", SqlDbType.VarChar, 96, name)
