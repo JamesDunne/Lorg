@@ -261,7 +261,7 @@ namespace Lorg
 
                 // Create the exException record if it does not exist:
                 var tskGetPolicy = conn.ExecReader(
-@"MERGE [dbo].[exException] AS target
+@"MERGE [dbo].[exException] WITH (HOLDLOCK) AS target
 USING (SELECT @exExceptionID) AS source (exExceptionID)
 ON (target.exExceptionID = source.exExceptionID)
 WHEN NOT MATCHED THEN
@@ -351,7 +351,7 @@ SET @exInstanceID = SCOPE_IDENTITY();",
 
             // Log the web application details:
             var tskWebApplication = conn.ExecNonQuery(
-@"MERGE [dbo].[exWebApplication] AS target
+@"MERGE [dbo].[exWebApplication] WITH (HOLDLOCK) AS target
 USING (SELECT @exWebApplicationID) AS source (exWebApplicationID)
 ON (target.exWebApplicationID = source.exWebApplicationID)
 WHEN NOT MATCHED THEN
@@ -464,7 +464,7 @@ VALUES (@exInstanceID,  @exWebApplicationID,  @AuthenticatedUserName,  @HttpVerb
             byte[] urlID = CalcURLID(uri);
 
             return conn.ExecNonQuery(
-@"MERGE [dbo].[exURL] AS target
+@"MERGE [dbo].[exURL] WITH (HOLDLOCK) AS target
 USING (SELECT @exURLID) AS source (exURLID)
 ON (target.exURLID = source.exURLID)
 WHEN NOT MATCHED THEN
@@ -498,7 +498,7 @@ WHEN NOT MATCHED THEN
 
             // Store the exURLQuery record:
             var tskLogURLQuery = conn.ExecNonQuery(
-@"MERGE [dbo].[exURLQuery] AS target
+@"MERGE [dbo].[exURLQuery] WITH (HOLDLOCK) AS target
 USING (SELECT @exURLQueryID) AS source (exURLQueryID)
 ON (target.exURLQueryID = source.exURLQueryID)
 WHEN NOT MATCHED THEN
@@ -551,7 +551,7 @@ WHEN NOT MATCHED THEN
 
                 // Merge the Value record:
                 tasks[i * numTasksPerPair + 0] = conn.ExecNonQuery(
-@"MERGE [dbo].[exCollectionValue] AS target
+@"MERGE [dbo].[exCollectionValue] WITH (HOLDLOCK) AS target
 USING (SELECT @exCollectionValueID) AS source (exCollectionValueID)
 ON (target.exCollectionValueID = source.exCollectionValueID)
 WHEN NOT MATCHED THEN
@@ -564,7 +564,7 @@ WHEN NOT MATCHED THEN
 
                 // Merge the Name-Value record:
                 tasks[i * numTasksPerPair + 1] = conn.ExecNonQuery(
-@"MERGE [dbo].[exCollectionKeyValue] AS target
+@"MERGE [dbo].[exCollectionKeyValue] WITH (HOLDLOCK) AS target
 USING (SELECT @exCollectionID, @Name, @exCollectionValueID) AS source (exCollectionID, Name, exCollectionValueID)
 ON (target.exCollectionID = source.exCollectionID AND target.Name = source.Name AND target.exCollectionValueID = source.exCollectionValueID)
 WHEN NOT MATCHED THEN
