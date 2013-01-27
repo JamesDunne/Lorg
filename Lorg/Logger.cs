@@ -260,8 +260,7 @@ namespace Lorg
                 }
 
                 // Create the exException record if it does not exist:
-                var tskGetPolicy = ExecReader(
-                    conn,
+                var tskGetPolicy = conn.ExecReader(
 @"MERGE [dbo].[exException] AS target
 USING (SELECT @exExceptionID) AS source (exExceptionID)
 ON (target.exExceptionID = source.exExceptionID)
@@ -273,12 +272,10 @@ SELECT [LogWebContext], [LogWebRequestHeaders]
 FROM [dbo].[exExceptionPolicy] WITH (NOLOCK)
 WHERE exExceptionID = @exExceptionID;",
                     prms =>
-                    {
-                        AddParameterWithSize(prms, "@exExceptionID", SqlDbType.Binary, 20, ctx.ExceptionID);
-                        AddParameterWithSize(prms, "@assemblyName", SqlDbType.NVarChar, 256, ctx.AssemblyName);
-                        AddParameterWithSize(prms, "@typeName", SqlDbType.NVarChar, 256, ctx.TypeName);
-                        AddParameterWithSize(prms, "@stackTrace", SqlDbType.NVarChar, -1, ctx.StackTrace);
-                    },
+                        prms.AddInParamSHA1("@exExceptionID", ctx.ExceptionID)
+                            .AddInParamSize("@assemblyName", SqlDbType.NVarChar, 256, ctx.AssemblyName)
+                            .AddInParamSize("@typeName", SqlDbType.NVarChar, 256, ctx.TypeName)
+                            .AddInParamSize("@stackTrace", SqlDbType.NVarChar, -1, ctx.StackTrace),
                     // Read the SELECT result set into an ExceptionPolicy, or use the default policy:
                     async dr =>
                         !await dr.ReadAsync()
@@ -290,27 +287,24 @@ WHERE exExceptionID = @exExceptionID;",
                 );
 
                 // Create the instance record:
-                int exInstanceID = await ExecNonQuery(
-                    conn,
+                int exInstanceID = await conn.ExecNonQuery(
 @"INSERT INTO [dbo].[exInstance] ([exExceptionID], [LoggedTimeUTC], [IsHandled], [CorrelationID], [Message], [ApplicationName], [EnvironmentName], [MachineName], [ProcessPath], [ExecutingAssemblyName], [ManagedThreadId], [ApplicationIdentity])
 VALUES (@exExceptionID, @loggedTimeUTC, @isHandled, @correlationID, @message, @applicationName, @environmentName, @machineName, @processPath, @executingAssemblyName, @managedThreadId, @applicationIdentity);
 SET @exInstanceID = SCOPE_IDENTITY();",
                     prms =>
-                    {
-                        AddParameterOut(prms, "@exInstanceID", SqlDbType.Int);
-                        AddParameterWithSize(prms, "@exExceptionID", SqlDbType.Binary, 20, ctx.ExceptionID);
-                        AddParameter(prms, "@loggedTimeUTC", SqlDbType.DateTime2, ctx.LoggedTimeUTC);
-                        AddParameter(prms, "@isHandled", SqlDbType.Bit, ctx.IsHandled);
-                        AddParameter(prms, "@correlationID", SqlDbType.UniqueIdentifier, AsDBNull(ctx.CorrelationID));
-                        AddParameterWithSize(prms, "@message", SqlDbType.NVarChar, 256, ctx.Exception.Message);
-                        AddParameterWithSize(prms, "@applicationName", SqlDbType.VarChar, 96, cfg.ApplicationName);
-                        AddParameterWithSize(prms, "@environmentName", SqlDbType.VarChar, 96, cfg.EnvironmentName);
-                        AddParameterWithSize(prms, "@machineName", SqlDbType.VarChar, 64, cfg.MachineName);
-                        AddParameterWithSize(prms, "@processPath", SqlDbType.NVarChar, 256, cfg.ProcessPath);
-                        AddParameterWithSize(prms, "@executingAssemblyName", SqlDbType.NVarChar, 256, ctx.Exception.TargetSite.DeclaringType.Assembly.FullName);
-                        AddParameter(prms, "@managedThreadId", SqlDbType.Int, ctx.ManagedThreadID);
-                        AddParameterWithSize(prms, "@applicationIdentity", SqlDbType.NVarChar, 128, cfg.ApplicationIdentity);
-                    },
+                        prms.AddOutParam("@exInstanceID", SqlDbType.Int)
+                            .AddInParamSHA1("@exExceptionID", ctx.ExceptionID)
+                            .AddInParam("@loggedTimeUTC", SqlDbType.DateTime2, ctx.LoggedTimeUTC)
+                            .AddInParam("@isHandled", SqlDbType.Bit, ctx.IsHandled)
+                            .AddInParam("@correlationID", SqlDbType.UniqueIdentifier, ctx.CorrelationID)
+                            .AddInParamSize("@message", SqlDbType.NVarChar, 256, ctx.Exception.Message)
+                            .AddInParamSize("@applicationName", SqlDbType.VarChar, 96, cfg.ApplicationName)
+                            .AddInParamSize("@environmentName", SqlDbType.VarChar, 96, cfg.EnvironmentName)
+                            .AddInParamSize("@machineName", SqlDbType.VarChar, 64, cfg.MachineName)
+                            .AddInParamSize("@processPath", SqlDbType.NVarChar, 256, cfg.ProcessPath)
+                            .AddInParamSize("@executingAssemblyName", SqlDbType.NVarChar, 256, ctx.Exception.TargetSite.DeclaringType.Assembly.FullName)
+                            .AddInParam("@managedThreadId", SqlDbType.Int, ctx.ManagedThreadID)
+                            .AddInParamSize("@applicationIdentity", SqlDbType.NVarChar, 128, cfg.ApplicationIdentity),
                     (prms, rc) =>
                     {
                         return (int)prms["@exInstanceID"].Value;
@@ -354,8 +348,7 @@ SET @exInstanceID = SCOPE_IDENTITY();",
             byte[] exWebApplicationID = CalcWebApplicationID(host);
 
             // Log the web application details:
-            var tskWebApplication = ExecNonQuery(
-                conn,
+            var tskWebApplication = conn.ExecNonQuery(
 @"MERGE [dbo].[exWebApplication] AS target
 USING (SELECT @exWebApplicationID) AS source (exWebApplicationID)
 ON (target.exWebApplicationID = source.exWebApplicationID)
@@ -363,14 +356,12 @@ WHEN NOT MATCHED THEN
     INSERT ([exWebApplicationID], [MachineName], [ApplicationID], [PhysicalPath], [VirtualPath], [SiteName])
     VALUES (@exWebApplicationID,  @MachineName,  @ApplicationID,  @PhysicalPath,  @VirtualPath,  @SiteName);",
                 prms =>
-                {
-                    AddParameterWithSize(prms, "@exWebApplicationID", SqlDbType.Binary, 20, exWebApplicationID);
-                    AddParameterWithSize(prms, "@MachineName", SqlDbType.NVarChar, 96, host.MachineName);
-                    AddParameterWithSize(prms, "@ApplicationID", SqlDbType.VarChar, 96, host.ApplicationID);
-                    AddParameterWithSize(prms, "@PhysicalPath", SqlDbType.NVarChar, 256, host.PhysicalPath);
-                    AddParameterWithSize(prms, "@VirtualPath", SqlDbType.NVarChar, 256, host.VirtualPath);
-                    AddParameterWithSize(prms, "@SiteName", SqlDbType.VarChar, 96, host.SiteName);
-                }
+                    prms.AddInParamSHA1("@exWebApplicationID", exWebApplicationID)
+                        .AddInParamSize("@MachineName", SqlDbType.NVarChar, 96, host.MachineName)
+                        .AddInParamSize("@ApplicationID", SqlDbType.VarChar, 96, host.ApplicationID)
+                        .AddInParamSize("@PhysicalPath", SqlDbType.NVarChar, 256, host.PhysicalPath)
+                        .AddInParamSize("@VirtualPath", SqlDbType.NVarChar, 256, host.VirtualPath)
+                        .AddInParamSize("@SiteName", SqlDbType.VarChar, 96, host.SiteName)
             );
 
             // Log the request headers collection, if requested and available:
@@ -385,23 +376,20 @@ WHEN NOT MATCHED THEN
             }
 
             // Log the web context:
-            var tskContextWeb = ExecNonQuery(
-                conn,
+            var tskContextWeb = conn.ExecNonQuery(
 @"INSERT INTO [dbo].[exContextWeb]
        ([exInstanceID], [exWebApplicationID], [AuthenticatedUserName], [HttpVerb], [RequestURLQueryID], [ReferrerURLQueryID], [RequestHeadersCollectionID])
 VALUES (@exInstanceID,  @exWebApplicationID,  @AuthenticatedUserName,  @HttpVerb,  @RequestURLQueryID,  @ReferrerURLQueryID,  @RequestHeadersCollectionID);",
                 prms =>
-                {
-                    AddParameter(prms, "@exInstanceID", SqlDbType.Int, exInstanceID);
+                    prms.AddInParam("@exInstanceID", SqlDbType.Int, exInstanceID)
                     // Hosting environment:
-                    AddParameterWithSize(prms, "@exWebApplicationID", SqlDbType.Binary, 20, exWebApplicationID);
+                        .AddInParamSHA1("@exWebApplicationID", exWebApplicationID)
                     // Request details:
-                    AddParameterWithSize(prms, "@AuthenticatedUserName", SqlDbType.VarChar, 96, AsDBNull(authUserName));
-                    AddParameterWithSize(prms, "@HttpVerb", SqlDbType.VarChar, 16, http.HttpMethod);
-                    AddParameterWithSize(prms, "@RequestURLQueryID", SqlDbType.Binary, 20, requestURLQueryID);
-                    AddParameterWithSize(prms, "@ReferrerURLQueryID", SqlDbType.Binary, 20, AsDBNull(referrerURLQueryID));
-                    AddParameterWithSize(prms, "@RequestHeadersCollectionID", SqlDbType.Binary, 20, AsDBNull(exCollectionID));
-                }
+                        .AddInParamSize("@AuthenticatedUserName", SqlDbType.VarChar, 96, authUserName)
+                        .AddInParamSize("@HttpVerb", SqlDbType.VarChar, 16, http.HttpMethod)
+                        .AddInParamSHA1("@RequestURLQueryID", requestURLQueryID)
+                        .AddInParamSHA1("@ReferrerURLQueryID", referrerURLQueryID)
+                        .AddInParamSHA1("@RequestHeadersCollectionID", exCollectionID)
             );
 
             // Log the URLs:
@@ -473,8 +461,7 @@ VALUES (@exInstanceID,  @exWebApplicationID,  @AuthenticatedUserName,  @HttpVerb
         {
             byte[] urlID = CalcURLID(uri);
 
-            return ExecNonQuery(
-                conn,
+            return conn.ExecNonQuery(
 @"MERGE [dbo].[exURL] AS target
 USING (SELECT @exURLID) AS source (exURLID)
 ON (target.exURLID = source.exURLID)
@@ -482,13 +469,11 @@ WHEN NOT MATCHED THEN
    INSERT ([exURLID], [HostName], [PortNumber], [AbsolutePath], [Scheme])
    VALUES (@exURLID,  @HostName,  @PortNumber,  @AbsolutePath,  @Scheme);",
                 prms =>
-                {
-                    AddParameterWithSize(prms, "@exURLID", SqlDbType.Binary, 20, urlID);
-                    AddParameterWithSize(prms, "@HostName", SqlDbType.VarChar, 128, uri.Host);
-                    AddParameter(prms, "@PortNumber", SqlDbType.Int, (int)uri.Port);
-                    AddParameterWithSize(prms, "@AbsolutePath", SqlDbType.VarChar, 512, uri.AbsolutePath);
-                    AddParameterWithSize(prms, "@Scheme", SqlDbType.VarChar, 8, uri.Scheme);
-                }
+                    prms.AddInParamSHA1("@exURLID", urlID)
+                        .AddInParamSize("@HostName", SqlDbType.VarChar, 128, uri.Host)
+                        .AddInParam("@PortNumber", SqlDbType.Int, (int)uri.Port)
+                        .AddInParamSize("@AbsolutePath", SqlDbType.VarChar, 512, uri.AbsolutePath)
+                        .AddInParamSize("@Scheme", SqlDbType.VarChar, 8, uri.Scheme)
             );
         }
 
@@ -510,8 +495,7 @@ WHEN NOT MATCHED THEN
             var tskLogURL = LogURL(conn, uri);
 
             // Store the exURLQuery record:
-            var tskLogURLQuery = ExecNonQuery(
-                conn,
+            var tskLogURLQuery = conn.ExecNonQuery(
 @"MERGE [dbo].[exURLQuery] AS target
 USING (SELECT @exURLQueryID) AS source (exURLQueryID)
 ON (target.exURLQueryID = source.exURLQueryID)
@@ -519,11 +503,9 @@ WHEN NOT MATCHED THEN
     INSERT ([exURLQueryID], [exURLID], [QueryString])
     VALUES (@exURLQueryID,  @exURLID,  @QueryString);",
                 prms =>
-                {
-                    AddParameterWithSize(prms, "@exURLQueryID", SqlDbType.Binary, 20, urlQueryID);
-                    AddParameterWithSize(prms, "@exURLID", SqlDbType.Binary, 20, urlID);
-                    AddParameterWithSize(prms, "@QueryString", SqlDbType.VarChar, -1, AsDBNull(uri.Query));
-                }
+                    prms.AddInParamSHA1("@exURLQueryID", urlQueryID)
+                        .AddInParamSHA1("@exURLID", urlID)
+                        .AddInParamSize("@QueryString", SqlDbType.VarChar, -1, uri.Query)
             );
 
             await tskLogURLQuery;
@@ -537,10 +519,9 @@ WHEN NOT MATCHED THEN
         /// <param name="exCollectionID"></param>
         /// <param name="coll"></param>
         /// <returns></returns>
-        Task LogCollection(SqlConnection conn, byte[] exCollectionID, NameValueCollection coll)
+        async Task LogCollection(SqlConnection conn, byte[] exCollectionID, NameValueCollection coll)
         {
             // The exCollectionID should be pre-calculated by `CalcCollectionID`.
-
             const int numTasksPerPair = 2;
 
             // Create an array of tasks to wait upon:
@@ -555,8 +536,7 @@ WHEN NOT MATCHED THEN
                 byte[] exCollectionValueID = SHA1Hash(value);
 
                 // Merge the Value record:
-                tasks[i * numTasksPerPair + 0] = ExecNonQuery(
-                    conn,
+                tasks[i * numTasksPerPair + 0] = conn.ExecNonQuery(
 @"MERGE [dbo].[exCollectionValue] AS target
 USING (SELECT @exCollectionValueID) AS source (exCollectionValueID)
 ON (target.exCollectionValueID = source.exCollectionValueID)
@@ -564,15 +544,12 @@ WHEN NOT MATCHED THEN
     INSERT ([exCollectionValueID], [Value])
     VALUES (@exCollectionValueID,  @Value);",
                     prms =>
-                    {
-                        AddParameterWithSize(prms, "@exCollectionValueID", SqlDbType.Binary, 20, exCollectionValueID);
-                        AddParameterWithSize(prms, "@Value", SqlDbType.VarChar, -1, value);
-                    }
+                        prms.AddInParamSHA1("@exCollectionValueID", exCollectionValueID)
+                            .AddInParamSize("@Value", SqlDbType.VarChar, -1, value)
                 );
 
                 // Merge the Name-Value record:
-                tasks[i * numTasksPerPair + 1] = ExecNonQuery(
-                    conn,
+                tasks[i * numTasksPerPair + 1] = conn.ExecNonQuery(
 @"MERGE [dbo].[exCollectionKeyValue] AS target
 USING (SELECT @exCollectionID, @Name, @exCollectionValueID) AS source (exCollectionID, Name, exCollectionValueID)
 ON (target.exCollectionID = source.exCollectionID AND target.Name = source.Name AND target.exCollectionValueID = source.exCollectionValueID)
@@ -580,15 +557,13 @@ WHEN NOT MATCHED THEN
     INSERT ([exCollectionID], [Name], [exCollectionValueID])
     VALUES (@exCollectionID,  @Name,  @exCollectionValueID);",
                     prms =>
-                    {
-                        AddParameterWithSize(prms, "@exCollectionID", SqlDbType.Binary, 20, exCollectionID);
-                        AddParameterWithSize(prms, "@Name", SqlDbType.VarChar, 96, name);
-                        AddParameterWithSize(prms, "@exCollectionValueID", SqlDbType.Binary, 20, exCollectionValueID);
-                    }
+                        prms.AddInParamSHA1("@exCollectionID", exCollectionID)
+                            .AddInParamSize("@Name", SqlDbType.VarChar, 96, name)
+                            .AddInParamSHA1("@exCollectionValueID", exCollectionValueID)
                 );
             }
             // Our final task's completion depends on all the tasks created thus far:
-            return Task.WhenAll(tasks);
+            await Task.WhenAll(tasks);
         }
 
         internal static byte[] SHA1Hash(string p)
@@ -623,138 +598,6 @@ WHEN NOT MATCHED THEN
                 Format(ctx.InnerException, sb, indent + 1);
             }
         }
-
-        #region Database helper methods
-
-        static object AsDBNull<T>(T value) where T : class
-        {
-            if (value == null) return DBNull.Value;
-            return value;
-        }
-
-        static object AsDBNull<T>(Nullable<T> value) where T : struct
-        {
-            if (!value.HasValue) return DBNull.Value;
-            return value.Value;
-        }
-
-        static async Task<TResult> ExecReader<TResult>(
-            SqlConnection conn,
-            string text,
-            Action<SqlParameterCollection> bindParameters,
-            Func<SqlDataReader, SqlCommand, Task<TResult>> read
-        )
-        {
-            using (var cmd = conn.CreateCommand())
-            {
-                cmd.CommandType = CommandType.Text;
-                cmd.CommandText = text;
-                bindParameters(cmd.Parameters);
-                using (var dr = await cmd.ExecuteReaderAsync(CommandBehavior.SequentialAccess))
-                    return await read(dr, cmd);
-            }
-        }
-
-        static async Task<TResult> ExecReader<TResult>(
-            SqlConnection conn,
-            string text,
-            Action<SqlParameterCollection> bindParameters,
-            Func<SqlDataReader, Task<TResult>> read
-        )
-        {
-            using (var cmd = conn.CreateCommand())
-            {
-                cmd.CommandType = CommandType.Text;
-                cmd.CommandText = text;
-                bindParameters(cmd.Parameters);
-                using (var dr = await cmd.ExecuteReaderAsync(CommandBehavior.SequentialAccess))
-                    return await read(dr);
-            }
-        }
-
-        static async Task<TResult> ExecReader<TResult>(
-            SqlConnection conn,
-            string text,
-            Func<SqlDataReader, Task<TResult>> read
-        )
-        {
-            using (var cmd = conn.CreateCommand())
-            {
-                cmd.CommandType = CommandType.Text;
-                cmd.CommandText = text;
-                using (var dr = await cmd.ExecuteReaderAsync(CommandBehavior.SequentialAccess))
-                    return await read(dr);
-            }
-        }
-
-        static async Task<int> ExecNonQuery(
-            SqlConnection conn,
-            string text
-        )
-        {
-            using (var cmd = conn.CreateCommand())
-            {
-                cmd.CommandType = CommandType.Text;
-                cmd.CommandText = text;
-                return await cmd.ExecuteNonQueryAsync();
-            }
-        }
-
-        static async Task<int> ExecNonQuery(
-            SqlConnection conn,
-            string text,
-            Action<SqlParameterCollection> bindParameters
-        )
-        {
-            using (var cmd = conn.CreateCommand())
-            {
-                cmd.CommandType = CommandType.Text;
-                cmd.CommandText = text;
-                bindParameters(cmd.Parameters);
-                return await cmd.ExecuteNonQueryAsync();
-            }
-        }
-
-        static async Task<TResult> ExecNonQuery<TResult>(
-            SqlConnection conn,
-            string text,
-            Action<SqlParameterCollection> bindParameters,
-            Func<SqlParameterCollection, int, TResult> report
-        )
-        {
-            using (var cmd = conn.CreateCommand())
-            {
-                cmd.CommandType = CommandType.Text;
-                cmd.CommandText = text;
-                bindParameters(cmd.Parameters);
-                int rc = await cmd.ExecuteNonQueryAsync();
-                return report(cmd.Parameters, rc);
-            }
-        }
-
-        static SqlParameter AddParameterOut(SqlParameterCollection prms, string name, SqlDbType type)
-        {
-            var prm = prms.Add(name, type);
-            prm.Direction = ParameterDirection.Output;
-            return prm;
-        }
-
-        static SqlParameter AddParameter(SqlParameterCollection prms, string name, SqlDbType type, object value)
-        {
-            var prm = prms.AddWithValue(name, value);
-            prm.SqlDbType = type;
-            return prm;
-        }
-
-        static SqlParameter AddParameterWithSize(SqlParameterCollection prms, string name, SqlDbType type, int size, object value)
-        {
-            var prm = prms.AddWithValue(name, value);
-            prm.SqlDbType = type;
-            prm.Size = size;
-            return prm;
-        }
-
-        #endregion
 
         #endregion
     }
