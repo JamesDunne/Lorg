@@ -522,6 +522,18 @@ WHEN NOT MATCHED THEN
         async Task LogCollection(SqlConnection conn, byte[] exCollectionID, NameValueCollection coll)
         {
             // The exCollectionID should be pre-calculated by `CalcCollectionID`.
+
+            // Check if the exCollectionID exists already:
+            bool collectionExists = await conn.ExecReader(
+@"SELECT TOP 1 FROM [dbo].[exCollectionKeyValue] WHERE [exCollectionID] = @exCollectionID",
+                prms =>
+                    prms.AddInParamSHA1("@exCollectionID", exCollectionID),
+                async dr => await dr.ReadAsync()
+            );
+
+            // Don't bother logging name-value pairs if the collection already exists:
+            if (collectionExists) return;
+
             const int numTasksPerPair = 2;
 
             // Create an array of tasks to wait upon:
