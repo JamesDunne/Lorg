@@ -13,7 +13,7 @@ LEFT JOIN [dbo].[exContextWeb] web ON web.exInstanceID = i.exInstanceID
 LEFT JOIN [dbo].[exURLQuery] requq ON requq.exURLQueryID = web.RequestURLQueryID
 LEFT JOIN [dbo].[exURL] requ ON requ.exURLID = requq.exURLID
 LEFT JOIN [dbo].[exWebApplication] webapp ON webapp.exWebApplicationID = web.exWebApplicationID
-ORDER BY i.[LoggedTimeUTC] DESC, i.[SequenceNumber] ASC
+ORDER BY i.[LoggedTimeUTC] DESC, i.[SequenceNumber] DESC
 
 -- Get header collections
 SELECT TOP 1000
