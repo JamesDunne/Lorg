@@ -26,6 +26,13 @@ namespace LorgMvcTest.Controllers
             return Content("");
         }
 
+        public async Task<ActionResult> Inner()
+        {
+            for (int i = 0; i < 500; ++i)
+                await ExceptionLogger.HandleExceptions(async () => { throw new Exception("Test", new Exception("Inner test")); });
+            return Content("");
+        }
+
         public async Task<JsonResult> Json()
         {
             throw new NotImplementedException();

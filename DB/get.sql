@@ -1,7 +1,8 @@
 
-SELECT TOP 1000
-      i.exInstanceID, i.LoggedTimeUTC, i.SequenceNumber, i.IsHandled, i.Message, i.ApplicationName, i.EnvironmentName, i.ExecutingAssemblyName
-    , e.TypeName + ', ' + e.AssemblyName AS ExceptionType, e.StackTrace
+SELECT TOP 6000
+      i.exInstanceID, i.LoggedTimeUTC, i.SequenceNumber, i.IsHandled, i.ParentInstanceID, i.Message
+    , app.ApplicationName, app.EnvironmentName
+    , e.TypeName + ', ' + e.AssemblyName AS ExceptionType, e.exTargetSiteID, e.StackTrace
     , webapp.MachineName, webapp.ApplicationID, webapp.SiteName, webapp.PhysicalPath, webapp.VirtualPath
     , web.HttpVerb
     , requ.Scheme + '://' + requ.HostName + ':' + CONVERT(varchar(5), requ.PortNumber) + requ.AbsolutePath + requq.QueryString AS RequestURL
@@ -9,6 +10,7 @@ SELECT TOP 1000
     , web.AuthenticatedUserName
 FROM [dbo].[exInstance] i
 JOIN [dbo].[exException] e ON e.exExceptionID = i.exExceptionID
+JOIN [dbo].[exApplication] app ON app.exApplicationID = i.exApplicationID
 LEFT JOIN [dbo].[exContextWeb] web ON web.exInstanceID = i.exInstanceID
 LEFT JOIN [dbo].[exURLQuery] requq ON requq.exURLQueryID = web.RequestURLQueryID
 LEFT JOIN [dbo].[exURL] requ ON requ.exURLID = requq.exURLID

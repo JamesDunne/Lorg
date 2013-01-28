@@ -239,7 +239,7 @@ namespace Lorg
         /// </summary>
         /// <param name="ctx"></param>
         /// <returns></returns>
-        async Task<Tuple<byte[], int>> WriteDatabase(ExceptionWithCapturedContext ctx)
+        async Task<Tuple<byte[], int>> WriteDatabase(ExceptionWithCapturedContext ctx, int? parentInstanceID = null)
         {
             using (var conn = new SqlConnection(cfg.ConnectionString))
             {
@@ -257,77 +257,137 @@ namespace Lorg
                     lastConnectAttempt = DateTime.UtcNow;
 
                     FailoverWrite(new ExceptionWithCapturedContext(sqex, isHandled: true));
+                    return null;
                 }
 
-                // Create the exException record if it does not exist:
-                var tskGetPolicy = conn.ExecReader(
+                return await LogExceptionRecursive(conn, ctx, null);
+            }
+        }
+
+        async Task<Tuple<byte[], int>> LogExceptionRecursive(SqlConnection conn, ExceptionWithCapturedContext ctx, int? parentInstanceID = null)
+        {
+            // Create the exTargetSite if it does not exist:
+            var ts = ctx.Exception.TargetSite;
+            byte[] exTargetSiteID = CalcTargetSiteID(ts);
+            Task tskTargetSite = null;
+            if (exTargetSiteID != null)
+            {
+                string tsAssembly = ts.DeclaringType.Assembly.FullName
+                     , tsType = ts.DeclaringType.FullName
+                     , tsMethod = ts.Name;
+
+                tskTargetSite = conn.ExecNonQuery(
+@"MERGE [dbo].[exTargetSite] WITH (HOLDLOCK) AS target
+USING (SELECT @exTargetSiteID) AS source (exTargetSiteID)
+ON (target.exTargetSiteID = source.exTargetSiteID)
+WHEN NOT MATCHED THEN
+    INSERT ([exTargetSiteID], [AssemblyName], [TypeName], [MethodName])
+    VALUES (@exTargetSiteID,  @AssemblyName,  @TypeName,  @MethodName );",
+                    prms =>
+                        prms.AddInParamSHA1("@exTargetSiteID", exTargetSiteID)
+                            .AddInParamSize("@AssemblyName", SqlDbType.NVarChar, 256, tsAssembly)
+                            .AddInParamSize("@TypeName", SqlDbType.NVarChar, 256, tsType)
+                            .AddInParamSize("@MethodName", SqlDbType.NVarChar, 256, tsMethod)
+                );
+            }
+
+            // Create the exException record if it does not exist:
+            var tskGetPolicy = conn.ExecReader(
 @"MERGE [dbo].[exException] WITH (HOLDLOCK) AS target
 USING (SELECT @exExceptionID) AS source (exExceptionID)
 ON (target.exExceptionID = source.exExceptionID)
 WHEN NOT MATCHED THEN
-    INSERT ([exExceptionID], [AssemblyName], [TypeName], [StackTrace])
-    VALUES (@exExceptionID,  @AssemblyName,  @TypeName,  @StackTrace );
+    INSERT ([exExceptionID], [AssemblyName], [TypeName], [StackTrace], [exTargetSiteID])
+    VALUES (@exExceptionID,  @AssemblyName,  @TypeName,  @StackTrace,  @exTargetSiteID );
 
 SELECT [LogWebContext], [LogWebRequestHeaders]
 FROM [dbo].[exExceptionPolicy] WITH (NOLOCK)
 WHERE exExceptionID = @exExceptionID;",
-                    prms =>
-                        prms.AddInParamSHA1("@exExceptionID", ctx.ExceptionID)
-                            .AddInParamSize("@AssemblyName", SqlDbType.NVarChar, 256, ctx.AssemblyName)
-                            .AddInParamSize("@TypeName", SqlDbType.NVarChar, 256, ctx.TypeName)
-                            .AddInParamSize("@StackTrace", SqlDbType.NVarChar, -1, ctx.StackTrace),
-                    // Read the SELECT result set into an ExceptionPolicy, or use the default policy:
-                    async dr =>
-                        !await dr.ReadAsync()
-                        ? ExceptionPolicy.Default
-                        : new ExceptionPolicy(
-                            logWebContext: dr.GetBoolean(dr.GetOrdinal("LogWebContext")),
-                            logWebRequestHeaders: dr.GetBoolean(dr.GetOrdinal("LogWebRequestHeaders"))
-                        )
-                );
+                prms =>
+                    prms.AddInParamSHA1("@exExceptionID", ctx.ExceptionID)
+                        .AddInParamSize("@AssemblyName", SqlDbType.NVarChar, 256, ctx.AssemblyName)
+                        .AddInParamSize("@TypeName", SqlDbType.NVarChar, 256, ctx.TypeName)
+                        .AddInParamSize("@StackTrace", SqlDbType.NVarChar, -1, ctx.StackTrace)
+                        .AddInParamSHA1("@exTargetSiteID", exTargetSiteID),
+                // Read the SELECT result set into an ExceptionPolicy, or use the default policy:
+                async dr =>
+                    !await dr.ReadAsync()
+                    ? ExceptionPolicy.Default
+                    : new ExceptionPolicy(
+                        logWebContext: dr.GetBoolean(dr.GetOrdinal("LogWebContext")),
+                        logWebRequestHeaders: dr.GetBoolean(dr.GetOrdinal("LogWebRequestHeaders"))
+                    )
+            );
 
-                // Create the instance record:
-                int exInstanceID = await conn.ExecNonQuery(
+            // Create the exException record if it does not exist:
+            byte[] exApplicationID = CalcApplicationID(cfg);
+            var tskApplication = conn.ExecNonQuery(
+@"MERGE [dbo].[exApplication] WITH (HOLDLOCK) AS target
+USING (SELECT @exApplicationID) AS source (exApplicationID)
+ON (target.exApplicationID = source.exApplicationID)
+WHEN NOT MATCHED THEN
+    INSERT ([exApplicationID], [MachineName], [ApplicationName], [EnvironmentName], [ProcessPath])
+    VALUES (@exApplicationID,  @MachineName,  @ApplicationName,  @EnvironmentName,  @ProcessPath );",
+                prms =>
+                    prms.AddInParamSHA1("@exApplicationID", exApplicationID)
+                        .AddInParamSize("@MachineName", SqlDbType.VarChar, 64, cfg.MachineName)
+                        .AddInParamSize("@ApplicationName", SqlDbType.VarChar, 96, cfg.ApplicationName)
+                        .AddInParamSize("@EnvironmentName", SqlDbType.VarChar, 32, cfg.EnvironmentName)
+                        .AddInParamSize("@ProcessPath", SqlDbType.NVarChar, 256, cfg.ProcessPath)
+            );
+
+            // Create the instance record:
+            var tskInstance = conn.ExecNonQuery(
 @"INSERT INTO [dbo].[exInstance]
-       ([exExceptionID], [LoggedTimeUTC], [SequenceNumber], [IsHandled], [CorrelationID], [Message], [ApplicationName], [EnvironmentName], [MachineName], [ProcessPath], [ExecutingAssemblyName], [ManagedThreadId], [ApplicationIdentity])
-VALUES (@exExceptionID,  @LoggedTimeUTC,  @SequenceNumber,  @IsHandled,  @CorrelationID,  @Message,  @ApplicationName,  @EnvironmentName,  @MachineName,  @ProcessPath,  @ExecutingAssemblyName,  @ManagedThreadId,  @ApplicationIdentity );
+       ([exExceptionID], [exApplicationID], [LoggedTimeUTC], [SequenceNumber], [IsHandled], [ApplicationIdentity], [ParentInstanceID], [CorrelationID], [ManagedThreadId], [Message])
+VALUES (@exExceptionID,  @exApplicationID,  @LoggedTimeUTC,  @SequenceNumber,  @IsHandled,  @ApplicationIdentity,  @ParentInstanceID,  @CorrelationID,  @ManagedThreadId,  @Message );
 SET @exInstanceID = SCOPE_IDENTITY();",
-                    prms =>
-                        prms.AddOutParam("@exInstanceID", SqlDbType.Int)
-                            .AddInParamSHA1("@exExceptionID", ctx.ExceptionID)
-                            .AddInParam("@LoggedTimeUTC", SqlDbType.DateTime2, ctx.LoggedTimeUTC)
-                            .AddInParam("@SequenceNumber", SqlDbType.Int, ctx.SequenceNumber)
-                            .AddInParam("@IsHandled", SqlDbType.Bit, ctx.IsHandled)
-                            .AddInParam("@CorrelationID", SqlDbType.UniqueIdentifier, ctx.CorrelationID)
-                            .AddInParamSize("@Message", SqlDbType.NVarChar, 256, ctx.Exception.Message)
-                            .AddInParamSize("@ApplicationName", SqlDbType.VarChar, 96, cfg.ApplicationName)
-                            .AddInParamSize("@EnvironmentName", SqlDbType.VarChar, 96, cfg.EnvironmentName)
-                            .AddInParamSize("@MachineName", SqlDbType.VarChar, 64, cfg.MachineName)
-                            .AddInParamSize("@ProcessPath", SqlDbType.NVarChar, 256, cfg.ProcessPath)
-                            .AddInParamSize("@ExecutingAssemblyName", SqlDbType.NVarChar, 256, ctx.Exception.TargetSite.DeclaringType.Assembly.FullName)
-                            .AddInParam("@ManagedThreadId", SqlDbType.Int, ctx.ManagedThreadID)
-                            .AddInParamSize("@ApplicationIdentity", SqlDbType.NVarChar, 128, cfg.ApplicationIdentity),
-                    (prms, rc) =>
-                    {
-                        return (int)prms["@exInstanceID"].Value;
-                    }
-                );
-
-                // Await the exception policy result:
-                var policy = await tskGetPolicy;
-
-                // If logging the web context is enabled and we have a web context to work with, log it:
-                Task tskLoggingWeb = null;
-                if (policy.LogWebContext && ctx.CapturedHttpContext != null)
+                prms =>
+                    prms.AddOutParam("@exInstanceID", SqlDbType.Int)
+                        .AddInParamSHA1("@exExceptionID", ctx.ExceptionID)
+                        .AddInParamSHA1("@exApplicationID", exApplicationID)
+                        .AddInParam("@LoggedTimeUTC", SqlDbType.DateTime2, ctx.LoggedTimeUTC)
+                        .AddInParam("@SequenceNumber", SqlDbType.Int, ctx.SequenceNumber)
+                        .AddInParam("@IsHandled", SqlDbType.Bit, ctx.IsHandled)
+                        .AddInParamSize("@ApplicationIdentity", SqlDbType.NVarChar, 128, cfg.ApplicationIdentity)
+                        .AddInParam("@ParentInstanceID", SqlDbType.Int, parentInstanceID)
+                        .AddInParam("@CorrelationID", SqlDbType.UniqueIdentifier, ctx.CorrelationID)
+                        .AddInParam("@ManagedThreadId", SqlDbType.Int, ctx.ManagedThreadID)
+                        .AddInParamSize("@Message", SqlDbType.NVarChar, 256, ctx.Exception.Message),
+                (prms, rc) =>
                 {
-                    tskLoggingWeb = LogWebContext(conn, policy, ctx, exInstanceID);
+                    return (int)prms["@exInstanceID"].Value;
                 }
+            );
 
-                // Wait for any outstanding logging tasks:
-                if (tskLoggingWeb != null) await tskLoggingWeb;
+            // Await the exInstance record creation:
+            int exInstanceID = await tskInstance;
 
-                return new Tuple<byte[], int>(ctx.ExceptionID, exInstanceID);
+            // Await the exception policy result:
+            var policy = await tskGetPolicy;
+
+            // If logging the web context is enabled and we have a web context to work with, log it:
+            Task tskLoggingWeb = null;
+            if (policy.LogWebContext && ctx.CapturedHttpContext != null)
+            {
+                tskLoggingWeb = LogWebContext(conn, policy, ctx, exInstanceID);
             }
+
+            // Wait for any outstanding logging tasks:
+            if (tskLoggingWeb != null) await tskLoggingWeb;
+            if (tskTargetSite != null) await tskTargetSite;
+            await tskApplication;
+
+            // Recursively log inner exceptions:
+            ExceptionWithCapturedContext inner = ctx.InnerException;
+            parentInstanceID = exInstanceID;
+            while (inner != null)
+            {
+                parentInstanceID = (await LogExceptionRecursive(conn, inner, parentInstanceID)).Item2;
+                inner = inner.InnerException;
+            }
+
+            return new Tuple<byte[], int>(ctx.ExceptionID, exInstanceID);
         }
 
         async Task LogWebContext(SqlConnection conn, ExceptionPolicy policy, ExceptionWithCapturedContext ctx, int exInstanceID)
@@ -410,7 +470,20 @@ VALUES (@exInstanceID,  @exWebApplicationID,  @AuthenticatedUserName,  @HttpVerb
             if (tskCollection != null) await tskCollection;
         }
 
-        private byte[] CalcCollectionID(NameValueCollection coll)
+        static byte[] CalcTargetSiteID(System.Reflection.MethodBase methodBase)
+        {
+            if (methodBase == null) return null;
+            byte[] id = SHA1Hash(
+                String.Concat(
+                    methodBase.DeclaringType.Assembly.FullName, ":",
+                    methodBase.DeclaringType.FullName, ":",
+                    methodBase.Name
+                )
+            );
+            return id;
+        }
+
+        static byte[] CalcCollectionID(NameValueCollection coll)
         {
             // Guesstimate the capacity required (40 chars per name/value pair):
             var sb = new StringBuilder(coll.Count * 40);
@@ -422,6 +495,19 @@ VALUES (@exInstanceID,  @exWebApplicationID,  @AuthenticatedUserName,  @HttpVerb
             }
 
             byte[] id = SHA1Hash(sb.ToString());
+            return id;
+        }
+
+        static byte[] CalcApplicationID(ValidConfiguration cfg)
+        {
+            byte[] id = SHA1Hash(
+                String.Concat(
+                    cfg.MachineName, ":",
+                    cfg.ApplicationName, ":",
+                    cfg.EnvironmentName, ":",
+                    cfg.ProcessPath
+                )
+            );
             return id;
         }
 
@@ -576,6 +662,7 @@ WHEN NOT MATCHED THEN
                             .AddInParamSHA1("@exCollectionValueID", exCollectionValueID)
                 );
             }
+
             // Our final task's completion depends on all the tasks created thus far:
             await Task.WhenAll(tasks);
         }
