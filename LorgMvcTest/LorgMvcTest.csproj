@@ -118,9 +118,7 @@
     </Reference>
   </ItemGroup>
   <ItemGroup>
-    <Compile Include="App_Code\LogExceptionsAttribute.cs" />
     <Compile Include="App_Start\FilterConfig.cs" />
-    <Compile Include="App_Start\ExceptionLogger.cs" />
     <Compile Include="App_Start\RouteConfig.cs" />
     <Compile Include="Controllers\TestController.cs" />
     <Compile Include="Global.asax.cs">
@@ -143,6 +141,7 @@
     <Content Include="Views\Shared\_Layout.cshtml" />
   </ItemGroup>
   <ItemGroup>
+    <Folder Include="App_Code\" />
     <Folder Include="App_Data\" />
     <Folder Include="Content\" />
     <Folder Include="Models\" />
@@ -152,6 +151,10 @@
     <Content Include="packages.config" />
   </ItemGroup>
   <ItemGroup>
+    <ProjectReference Include="..\Lorg.MVC4\Lorg.Mvc4.csproj">
+      <Project>{77b2e29c-ff83-49eb-ad5a-307f46a99c2d}</Project>
+      <Name>Lorg.Mvc4</Name>
+    </ProjectReference>
     <ProjectReference Include="..\Lorg\Lorg.csproj">
       <Project>{a6b5443e-20e5-4ed1-9e8c-dcfe03b15a3c}</Project>
       <Name>Lorg</Name>

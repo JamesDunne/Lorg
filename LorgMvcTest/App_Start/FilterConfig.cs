@@ -7,7 +7,7 @@ namespace LorgMvcTest
     {
         public static void RegisterGlobalFilters(GlobalFilterCollection filters)
         {
-            filters.Add(new LorgMvcTest.LogExceptionsAttribute());
+            filters.Add(new Lorg.Mvc4.LogExceptionsAttribute());
             filters.Add(new HandleErrorAttribute());
         }
     }

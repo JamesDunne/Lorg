@@ -5,7 +5,7 @@ using System.Threading.Tasks;
 using System.Web;
 using System.Web.Mvc;
 
-namespace LorgMvcTest
+namespace Lorg.Mvc4
 {
     public sealed class LogExceptionsAttribute : FilterAttribute, IExceptionFilter
     {

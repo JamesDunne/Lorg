@@ -1,4 +1,5 @@
-﻿using System;
+﻿using Lorg.Mvc4;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Web;
@@ -15,7 +16,17 @@ namespace LorgMvcTest
     {
         protected void Application_Start()
         {
-            ExceptionLogger.CreateLogger();
+            ExceptionLogger.CreateLogger(new Lorg.Logger.Configuration()
+            {
+                ApplicationName = "LorgMvcTest",
+                EnvironmentName = "Local",
+                ConnectionString = new System.Data.SqlClient.SqlConnectionStringBuilder()
+                {
+                    InitialCatalog = "Lorg",
+                    DataSource = ".",
+                    IntegratedSecurity = true,
+                }.ToString()
+            });
 
             AreaRegistration.RegisterAllAreas();
 
