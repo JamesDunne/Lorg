@@ -7,6 +7,8 @@ using System.Text;
 using System.Threading.Tasks;
 using Lorg;
 
+#pragma warning disable 1998
+
 namespace LorgTest
 {
     class Program
