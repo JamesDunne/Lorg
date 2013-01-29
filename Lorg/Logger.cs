@@ -15,7 +15,60 @@ namespace Lorg
     {
         const double connectRetrySeconds = 30.0d;
 
+        readonly FaultTolerancePolicy faultPolicy;
         readonly ValidConfiguration cfg;
+
+        /// <summary>
+        /// Construct an instance with default configuration.
+        /// </summary>
+        public Logger(ValidConfiguration cfg)
+        {
+            this.cfg = cfg;
+            this.faultPolicy = new AutoRetryPolicy(this, 3);
+        }
+
+        class FailoverFaultTolerancePolicy : FaultTolerancePolicy
+        {
+            readonly Logger log;
+
+            internal FailoverFaultTolerancePolicy(Logger log)
+            {
+                this.log = log;
+            }
+
+            protected override async Task HandleException(ExceptionWithCapturedContext ex)
+            {
+                log.FailoverWrite(ex);
+            }
+        }
+
+        class AutoRetryPolicy : FailoverFaultTolerancePolicy
+        {
+            readonly int maxAttempts;
+
+            internal AutoRetryPolicy(Logger log, int maxAttempts)
+                : base(log)
+            {
+                this.maxAttempts = maxAttempts;
+            }
+
+            public override async Task<Maybe<TResult>> Try<TResult>(Func<Task<TResult>> action)
+            {
+                Maybe<TResult> tmp;
+                int attempts = 0;
+
+                do
+                {
+                    // Use the base Try method to try and log the failure:
+                    tmp = await base.Try<TResult>(action);
+                    if (tmp.HasValue) return tmp;
+                    // Keep trying until we reached the max # of attempts:
+                } while (++attempts >= maxAttempts);
+
+                // Failed:
+                return Maybe<TResult>.Nothing;
+            }
+        }
 
         DateTime lastConnectAttempt = DateTime.UtcNow;
         bool noConnection = false;
@@ -33,6 +86,11 @@ namespace Lorg
             public string ApplicationName { get; set; }
             public string EnvironmentName { get; set; }
             public string ConnectionString { get; set; }
+
+            /// <summary>
+            /// Determines whether exception data is logged transactionally or not.
+            /// </summary>
+            public bool IsTransactional { get; set; }
         }
 
         /// <summary>
@@ -47,6 +105,7 @@ namespace Lorg
             public string MachineName { get; internal set; }
             public string ProcessPath { get; internal set; }
             public string ApplicationIdentity { get; internal set; }
+            public bool IsTransactional { get; internal set; }
 
             internal static readonly ValidConfiguration Default = new ValidConfiguration()
             {
@@ -56,7 +115,8 @@ namespace Lorg
 
                 MachineName = Environment.MachineName,
                 ProcessPath = Environment.GetCommandLineArgs()[0],
-                ApplicationIdentity = String.Empty
+                ApplicationIdentity = String.Empty,
+                IsTransactional = true
             };
         }
 
@@ -86,16 +146,9 @@ namespace Lorg
 
                 MachineName = Environment.MachineName,
                 ProcessPath = Environment.GetCommandLineArgs()[0],
-                ApplicationIdentity = Thread.CurrentPrincipal.Identity.Name
+                ApplicationIdentity = Thread.CurrentPrincipal.Identity.Name,
+                IsTransactional = cfg.IsTransactional
             };
-        }
-
-        /// <summary>
-        /// Construct an instance with default configuration.
-        /// </summary>
-        public Logger(ValidConfiguration cfg)
-        {
-            this.cfg = cfg;
         }
 
         /// <summary>
@@ -249,10 +302,12 @@ namespace Lorg
 
                 try
                 {
+                    // Open connection and check connectivity:
                     await conn.OpenAsync();
                 }
                 catch (SqlException sqex)
                 {
+                    // No connectivity; reset attempt timer:
                     noConnection = true;
                     lastConnectAttempt = DateTime.UtcNow;
 
@@ -260,11 +315,37 @@ namespace Lorg
                     return null;
                 }
 
-                return await LogExceptionRecursive(conn, ctx, null);
+                if (cfg.IsTransactional)
+                {
+                    // Transactional logging:
+                    using (var tran = conn.BeginTransaction(IsolationLevel.Snapshot))
+                    {
+                        var connCtx = new SqlConnectionContext(conn, tran);
+                        try
+                        {
+                            var logged = await LogExceptionRecursively(connCtx, ctx, null);
+                            tran.Commit();
+                            return logged;
+                        }
+                        catch (Exception ex)
+                        {
+                            tran.Rollback();
+                            FailoverWrite(new ExceptionWithCapturedContext(ex, isHandled: true));
+                            return null;
+                        }
+                    }
+                }
+                else
+                {
+                    // Non-transactional logging:
+                    var connCtx = new SqlConnectionContext(conn);
+                    var logged = await LogExceptionRecursively(connCtx, ctx, null);
+                    return logged;
+                }
             }
         }
 
-        async Task<Tuple<byte[], int>> LogExceptionRecursive(SqlConnection conn, ExceptionWithCapturedContext ctx, int? parentInstanceID = null)
+        async Task<Tuple<byte[], int>> LogExceptionRecursively(SqlConnectionContext conn, ExceptionWithCapturedContext ctx, int? parentInstanceID = null)
         {
             // Create the exTargetSite if it does not exist:
             var ts = ctx.Exception.TargetSite;
@@ -300,9 +381,9 @@ WHEN NOT MATCHED THEN
     INSERT ([exExceptionID], [AssemblyName], [TypeName], [StackTrace], [exTargetSiteID])
     VALUES (@exExceptionID,  @AssemblyName,  @TypeName,  @StackTrace,  @exTargetSiteID );
 
-SELECT [LogWebContext], [LogWebRequestHeaders]
-FROM [dbo].[exExceptionPolicy] WITH (NOLOCK)
-WHERE exExceptionID = @exExceptionID;",
+SELECT excpol.[LogWebContext], excpol.[LogWebRequestHeaders]
+FROM [dbo].[exExceptionPolicy] excpol WITH (NOLOCK)
+WHERE excpol.[exExceptionID] = @exExceptionID;",
                 prms =>
                     prms.AddInParamSHA1("@exExceptionID", ctx.ExceptionID)
                         .AddInParamSize("@AssemblyName", SqlDbType.NVarChar, 256, ctx.AssemblyName)
@@ -383,14 +464,14 @@ SET @exInstanceID = SCOPE_IDENTITY();",
             parentInstanceID = exInstanceID;
             while (inner != null)
             {
-                parentInstanceID = (await LogExceptionRecursive(conn, inner, parentInstanceID)).Item2;
+                parentInstanceID = (await LogExceptionRecursively(conn, inner, parentInstanceID)).Item2;
                 inner = inner.InnerException;
             }
 
             return new Tuple<byte[], int>(ctx.ExceptionID, exInstanceID);
         }
 
-        async Task LogWebContext(SqlConnection conn, ExceptionPolicy policy, ExceptionWithCapturedContext ctx, int exInstanceID)
+        async Task LogWebContext(SqlConnectionContext conn, ExceptionPolicy policy, ExceptionWithCapturedContext ctx, int exInstanceID)
         {
             var http = ctx.CapturedHttpContext;
             var host = ctx.WebHostingContext;
@@ -463,11 +544,136 @@ VALUES (@exInstanceID,  @exWebApplicationID,  @AuthenticatedUserName,  @HttpVerb
                 tskReferrerURL = null;
 
             // Await the completion of the tasks:
-            await tskRequestURL;
+            await Task.WhenAll(tskRequestURL, tskWebApplication, tskContextWeb);
             if (tskReferrerURL != null) await tskReferrerURL;
-            await tskWebApplication;
-            await tskContextWeb;
             if (tskCollection != null) await tskCollection;
+        }
+
+        /// <summary>
+        /// Writes a URL without query-string to the exURL table.
+        /// </summary>
+        /// <param name="conn"></param>
+        /// <param name="uri"></param>
+        /// <returns></returns>
+        Task LogURL(SqlConnectionContext conn, Uri uri)
+        {
+            byte[] urlID = CalcURLID(uri);
+
+            return conn.ExecNonQuery(
+@"MERGE [dbo].[exURL] WITH (HOLDLOCK) AS target
+USING (SELECT @exURLID) AS source (exURLID)
+ON (target.exURLID = source.exURLID)
+WHEN NOT MATCHED THEN
+   INSERT ([exURLID], [HostName], [PortNumber], [AbsolutePath], [Scheme])
+   VALUES (@exURLID,  @HostName,  @PortNumber,  @AbsolutePath,  @Scheme );",
+                prms =>
+                    prms.AddInParamSHA1("@exURLID", urlID)
+                        .AddInParamSize("@HostName", SqlDbType.VarChar, 128, uri.Host)
+                        .AddInParam("@PortNumber", SqlDbType.Int, (int)uri.Port)
+                        .AddInParamSize("@AbsolutePath", SqlDbType.VarChar, 512, uri.AbsolutePath)
+                        .AddInParamSize("@Scheme", SqlDbType.VarChar, 8, uri.Scheme)
+            );
+        }
+
+        /// <summary>
+        /// Writes a URL with query-string to the exURLQuery table.
+        /// </summary>
+        /// <param name="conn"></param>
+        /// <param name="uri"></param>
+        /// <returns></returns>
+        async Task LogURLQuery(SqlConnectionContext conn, Uri uri)
+        {
+            // Log the base URL:
+            byte[] urlID = CalcURLID(uri);
+
+            // Compute the URLQueryID:
+            byte[] urlQueryID = CalcURLQueryID(uri);
+
+            // Store the exURL record:
+            var tskLogURL = LogURL(conn, uri);
+
+            // Store the exURLQuery record:
+            var tskLogURLQuery = conn.ExecNonQuery(
+@"MERGE [dbo].[exURLQuery] WITH (HOLDLOCK) AS target
+USING (SELECT @exURLQueryID) AS source (exURLQueryID)
+ON (target.exURLQueryID = source.exURLQueryID)
+WHEN NOT MATCHED THEN
+    INSERT ([exURLQueryID], [exURLID], [QueryString])
+    VALUES (@exURLQueryID,  @exURLID,  @QueryString);",
+                prms =>
+                    prms.AddInParamSHA1("@exURLQueryID", urlQueryID)
+                        .AddInParamSHA1("@exURLID", urlID)
+                        .AddInParamSize("@QueryString", SqlDbType.VarChar, -1, uri.Query)
+            );
+
+            await Task.WhenAll(tskLogURLQuery, tskLogURL);
+        }
+
+        /// <summary>
+        /// Logs all name/value pairs as a single collection using concurrent MERGE statements.
+        /// </summary>
+        /// <param name="conn"></param>
+        /// <param name="exCollectionID"></param>
+        /// <param name="coll"></param>
+        /// <returns></returns>
+        async Task LogCollection(SqlConnectionContext conn, byte[] exCollectionID, NameValueCollection coll)
+        {
+            // The exCollectionID should be pre-calculated by `CalcCollectionID`.
+
+            // Check if the exCollectionID exists already:
+            bool collectionExists = await conn.ExecReader(
+@"SELECT TOP 1 1 FROM [dbo].[exCollectionKeyValue] WHERE [exCollectionID] = @exCollectionID",
+                prms =>
+                    prms.AddInParamSHA1("@exCollectionID", exCollectionID),
+                async dr => await dr.ReadAsync()
+            );
+
+            // Don't bother logging name-value pairs if the collection already exists:
+            if (collectionExists) return;
+
+            const int numTasksPerPair = 2;
+
+            // Create an array of tasks to wait upon:
+            var tasks = new Task[coll.Count * numTasksPerPair];
+
+            // Fill out the array of tasks with concurrent MERGE statements for each name/value pair:
+            for (int i = 0; i < coll.Count; ++i)
+            {
+                string name = coll.GetKey(i);
+                string value = coll.Get(i);
+
+                byte[] exCollectionValueID = SHA1Hash(value);
+
+                // Merge the Value record:
+                tasks[i * numTasksPerPair + 0] = faultPolicy.Try(() => conn.ExecNonQuery(
+@"MERGE [dbo].[exCollectionValue] WITH (HOLDLOCK) AS target
+USING (SELECT @exCollectionValueID) AS source (exCollectionValueID)
+ON (target.exCollectionValueID = source.exCollectionValueID)
+WHEN NOT MATCHED THEN
+    INSERT ([exCollectionValueID], [Value])
+    VALUES (@exCollectionValueID,  @Value );",
+                    prms =>
+                        prms.AddInParamSHA1("@exCollectionValueID", exCollectionValueID)
+                            .AddInParamSize("@Value", SqlDbType.VarChar, -1, value)
+                ));
+
+                // Merge the Name-Value record:
+                tasks[i * numTasksPerPair + 1] = faultPolicy.Try(() => conn.ExecNonQuery(
+@"MERGE [dbo].[exCollectionKeyValue] WITH (HOLDLOCK) AS target
+USING (SELECT @exCollectionID, @Name, @exCollectionValueID) AS source (exCollectionID, Name, exCollectionValueID)
+ON (target.exCollectionID = source.exCollectionID AND target.Name = source.Name AND target.exCollectionValueID = source.exCollectionValueID)
+WHEN NOT MATCHED THEN
+    INSERT ([exCollectionID], [Name], [exCollectionValueID])
+    VALUES (@exCollectionID,  @Name,  @exCollectionValueID );",
+                    prms =>
+                        prms.AddInParamSHA1("@exCollectionID", exCollectionID)
+                            .AddInParamSize("@Name", SqlDbType.VarChar, 96, name)
+                            .AddInParamSHA1("@exCollectionValueID", exCollectionValueID)
+                ));
+            }
+
+            // Our final task's completion depends on all the tasks created thus far:
+            await Task.WhenAll(tasks);
         }
 
         static byte[] CalcTargetSiteID(System.Reflection.MethodBase methodBase)
@@ -537,134 +743,6 @@ VALUES (@exInstanceID,  @exWebApplicationID,  @AuthenticatedUserName,  @HttpVerb
             byte[] id = SHA1Hash("{0}://{1}:{2}{3}{4}".F(uri.Scheme, uri.Host, uri.Port, uri.AbsolutePath, uri.Query));
             Debug.Assert(id.Length == 20);
             return id;
-        }
-
-        /// <summary>
-        /// Writes a URL without query-string to the exURL table.
-        /// </summary>
-        /// <param name="conn"></param>
-        /// <param name="uri"></param>
-        /// <returns></returns>
-        Task LogURL(SqlConnection conn, Uri uri)
-        {
-            byte[] urlID = CalcURLID(uri);
-
-            return conn.ExecNonQuery(
-@"MERGE [dbo].[exURL] WITH (HOLDLOCK) AS target
-USING (SELECT @exURLID) AS source (exURLID)
-ON (target.exURLID = source.exURLID)
-WHEN NOT MATCHED THEN
-   INSERT ([exURLID], [HostName], [PortNumber], [AbsolutePath], [Scheme])
-   VALUES (@exURLID,  @HostName,  @PortNumber,  @AbsolutePath,  @Scheme );",
-                prms =>
-                    prms.AddInParamSHA1("@exURLID", urlID)
-                        .AddInParamSize("@HostName", SqlDbType.VarChar, 128, uri.Host)
-                        .AddInParam("@PortNumber", SqlDbType.Int, (int)uri.Port)
-                        .AddInParamSize("@AbsolutePath", SqlDbType.VarChar, 512, uri.AbsolutePath)
-                        .AddInParamSize("@Scheme", SqlDbType.VarChar, 8, uri.Scheme)
-            );
-        }
-
-        /// <summary>
-        /// Writes a URL with query-string to the exURLQuery table.
-        /// </summary>
-        /// <param name="conn"></param>
-        /// <param name="uri"></param>
-        /// <returns></returns>
-        async Task LogURLQuery(SqlConnection conn, Uri uri)
-        {
-            // Log the base URL:
-            byte[] urlID = CalcURLID(uri);
-
-            // Compute the URLQueryID:
-            byte[] urlQueryID = CalcURLQueryID(uri);
-
-            // Store the exURL record:
-            var tskLogURL = LogURL(conn, uri);
-
-            // Store the exURLQuery record:
-            var tskLogURLQuery = conn.ExecNonQuery(
-@"MERGE [dbo].[exURLQuery] WITH (HOLDLOCK) AS target
-USING (SELECT @exURLQueryID) AS source (exURLQueryID)
-ON (target.exURLQueryID = source.exURLQueryID)
-WHEN NOT MATCHED THEN
-    INSERT ([exURLQueryID], [exURLID], [QueryString])
-    VALUES (@exURLQueryID,  @exURLID,  @QueryString);",
-                prms =>
-                    prms.AddInParamSHA1("@exURLQueryID", urlQueryID)
-                        .AddInParamSHA1("@exURLID", urlID)
-                        .AddInParamSize("@QueryString", SqlDbType.VarChar, -1, uri.Query)
-            );
-
-            await tskLogURLQuery;
-            await tskLogURL;
-        }
-
-        /// <summary>
-        /// Logs all name/value pairs as a single collection using concurrent MERGE statements.
-        /// </summary>
-        /// <param name="conn"></param>
-        /// <param name="exCollectionID"></param>
-        /// <param name="coll"></param>
-        /// <returns></returns>
-        async Task LogCollection(SqlConnection conn, byte[] exCollectionID, NameValueCollection coll)
-        {
-            // The exCollectionID should be pre-calculated by `CalcCollectionID`.
-
-            // Check if the exCollectionID exists already:
-            bool collectionExists = await conn.ExecReader(
-@"SELECT TOP 1 1 FROM [dbo].[exCollectionKeyValue] WHERE [exCollectionID] = @exCollectionID",
-                prms =>
-                    prms.AddInParamSHA1("@exCollectionID", exCollectionID),
-                async dr => await dr.ReadAsync()
-            );
-
-            // Don't bother logging name-value pairs if the collection already exists:
-            if (collectionExists) return;
-
-            const int numTasksPerPair = 2;
-
-            // Create an array of tasks to wait upon:
-            var tasks = new Task[coll.Count * numTasksPerPair];
-
-            // Fill out the array of tasks with concurrent MERGE statements for each name/value pair:
-            for (int i = 0; i < coll.Count; ++i)
-            {
-                string name = coll.GetKey(i);
-                string value = coll.Get(i);
-
-                byte[] exCollectionValueID = SHA1Hash(value);
-
-                // Merge the Value record:
-                tasks[i * numTasksPerPair + 0] = conn.ExecNonQuery(
-@"MERGE [dbo].[exCollectionValue] WITH (HOLDLOCK) AS target
-USING (SELECT @exCollectionValueID) AS source (exCollectionValueID)
-ON (target.exCollectionValueID = source.exCollectionValueID)
-WHEN NOT MATCHED THEN
-    INSERT ([exCollectionValueID], [Value])
-    VALUES (@exCollectionValueID,  @Value );",
-                    prms =>
-                        prms.AddInParamSHA1("@exCollectionValueID", exCollectionValueID)
-                            .AddInParamSize("@Value", SqlDbType.VarChar, -1, value)
-                );
-
-                // Merge the Name-Value record:
-                tasks[i * numTasksPerPair + 1] = conn.ExecNonQuery(
-@"MERGE [dbo].[exCollectionKeyValue] WITH (HOLDLOCK) AS target
-USING (SELECT @exCollectionID, @Name, @exCollectionValueID) AS source (exCollectionID, Name, exCollectionValueID)
-ON (target.exCollectionID = source.exCollectionID AND target.Name = source.Name AND target.exCollectionValueID = source.exCollectionValueID)
-WHEN NOT MATCHED THEN
-    INSERT ([exCollectionID], [Name], [exCollectionValueID])
-    VALUES (@exCollectionID,  @Name,  @exCollectionValueID );",
-                    prms =>
-                        prms.AddInParamSHA1("@exCollectionID", exCollectionID)
-                            .AddInParamSize("@Name", SqlDbType.VarChar, 96, name)
-                            .AddInParamSHA1("@exCollectionValueID", exCollectionValueID)
-                );
-            }
-
-            // Our final task's completion depends on all the tasks created thus far:
-            await Task.WhenAll(tasks);
         }
 
         internal static byte[] SHA1Hash(string p)

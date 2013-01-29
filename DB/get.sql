@@ -1,4 +1,3 @@
-
 SELECT TOP 6000
       i.exInstanceID, i.LoggedTimeUTC, i.SequenceNumber, i.IsHandled, i.ParentInstanceID, i.Message
     , app.ApplicationName, app.EnvironmentName

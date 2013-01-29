@@ -9,9 +9,7 @@ namespace LorgMvcTest.Controllers
 {
     public class TestController : Controller
     {
-        //
-        // GET: /Test/
-
+#pragma warning disable 1998
         public async Task<ActionResult> Index()
         {
             for (int i = 0; i < 100; ++i)
@@ -37,5 +35,6 @@ namespace LorgMvcTest.Controllers
         {
             throw new NotImplementedException();
         }
+#pragma warning restore 1998
     }
 }

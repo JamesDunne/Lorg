@@ -47,11 +47,14 @@
     <Reference Include="System.Xml" />
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="FaultTolerancePolicy.cs" />
     <Compile Include="CapturedHttpContext.cs" />
     <Compile Include="ExceptionWithCapturedContext.cs" />
     <Compile Include="Extensions.cs" />
     <Compile Include="Logger.cs" />
+    <Compile Include="Maybe.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
+    <Compile Include="SqlConnectionContext.cs" />
     <Compile Include="SymptomaticException.cs" />
     <Compile Include="WebHostingContext.cs" />
   </ItemGroup>
