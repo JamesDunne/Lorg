@@ -13,9 +13,8 @@ namespace Lorg
 {
     public sealed class Logger
     {
-        const double connectRetrySeconds = 30.0d;
+        const double connectRetrySeconds = 10.0d;
 
-        readonly FaultTolerancePolicy faultPolicy;
         readonly ValidConfiguration cfg;
 
         /// <summary>
@@ -24,50 +23,6 @@ namespace Lorg
         public Logger(ValidConfiguration cfg)
         {
             this.cfg = cfg;
-            this.faultPolicy = new AutoRetryPolicy(this, 3);
-        }
-
-        class FailoverFaultTolerancePolicy : FaultTolerancePolicy
-        {
-            readonly Logger log;
-
-            internal FailoverFaultTolerancePolicy(Logger log)
-            {
-                this.log = log;
-            }
-
-            protected override async Task HandleException(ExceptionWithCapturedContext ex)
-            {
-                log.FailoverWrite(ex);
-            }
-        }
-
-        class AutoRetryPolicy : FailoverFaultTolerancePolicy
-        {
-            readonly int maxAttempts;
-
-            internal AutoRetryPolicy(Logger log, int maxAttempts)
-                : base(log)
-            {
-                this.maxAttempts = maxAttempts;
-            }
-
-            public override async Task<Maybe<TResult>> Try<TResult>(Func<Task<TResult>> action)
-            {
-                Maybe<TResult> tmp;
-                int attempts = 0;
-
-                do
-                {
-                    // Use the base Try method to try and log the failure:
-                    tmp = await base.Try<TResult>(action);
-                    if (tmp.HasValue) return tmp;
-                    // Keep trying until we reached the max # of attempts:
-                } while (++attempts >= maxAttempts);
-
-                // Failed:
-                return Maybe<TResult>.Nothing;
-            }
         }
 
         DateTime lastConnectAttempt = DateTime.UtcNow;
@@ -305,13 +260,13 @@ namespace Lorg
                     // Open connection and check connectivity:
                     await conn.OpenAsync();
                 }
-                catch (SqlException sqex)
+                catch (Exception inex)
                 {
                     // No connectivity; reset attempt timer:
                     noConnection = true;
                     lastConnectAttempt = DateTime.UtcNow;
 
-                    FailoverWrite(new ExceptionWithCapturedContext(sqex, isHandled: true));
+                    FailoverWrite(new ExceptionWithCapturedContext(inex, isHandled: true));
                     return null;
                 }
 
@@ -348,27 +303,29 @@ namespace Lorg
         async Task<Tuple<byte[], int>> LogExceptionRecursively(SqlConnectionContext conn, ExceptionWithCapturedContext ctx, int? parentInstanceID = null)
         {
             // Create the exTargetSite if it does not exist:
-            var ts = ctx.Exception.TargetSite;
-            byte[] exTargetSiteID = CalcTargetSiteID(ts);
+            var ts = ctx.TargetSite;
+            byte[] exTargetSiteID = null;
             Task tskTargetSite = null;
-            if (exTargetSiteID != null)
+            if (ts != null)
             {
-                string tsAssembly = ts.DeclaringType.Assembly.FullName
-                     , tsType = ts.DeclaringType.FullName
-                     , tsMethod = ts.Name;
+                exTargetSiteID = ts.TargetSiteID;
 
                 tskTargetSite = conn.ExecNonQuery(
 @"MERGE [dbo].[exTargetSite] WITH (HOLDLOCK) AS target
 USING (SELECT @exTargetSiteID) AS source (exTargetSiteID)
 ON (target.exTargetSiteID = source.exTargetSiteID)
 WHEN NOT MATCHED THEN
-    INSERT ([exTargetSiteID], [AssemblyName], [TypeName], [MethodName])
-    VALUES (@exTargetSiteID,  @AssemblyName,  @TypeName,  @MethodName );",
+    INSERT ([exTargetSiteID], [AssemblyName], [TypeName], [MethodName], [ILOffset], [FileName], [FileLineNumber], [FileColumnNumber])
+    VALUES (@exTargetSiteID,  @AssemblyName,  @TypeName , @MethodName , @ILOffset , @FileName , @FileLineNumber , @FileColumnNumber );",
                     prms =>
                         prms.AddInParamSHA1("@exTargetSiteID", exTargetSiteID)
-                            .AddInParamSize("@AssemblyName", SqlDbType.NVarChar, 256, tsAssembly)
-                            .AddInParamSize("@TypeName", SqlDbType.NVarChar, 256, tsType)
-                            .AddInParamSize("@MethodName", SqlDbType.NVarChar, 256, tsMethod)
+                            .AddInParamSize("@AssemblyName", SqlDbType.NVarChar, 256, ts.AssemblyName)
+                            .AddInParamSize("@TypeName", SqlDbType.NVarChar, 256, ts.TypeName)
+                            .AddInParamSize("@MethodName", SqlDbType.NVarChar, 256, ts.MethodName)
+                            .AddInParam("@ILOffset", SqlDbType.Int, ts.ILOffset)
+                            .AddInParamSize("@FileName", SqlDbType.NVarChar, 256, ts.FileName)
+                            .AddInParam("@FileLineNumber", SqlDbType.Int, ts.FileLineNumber)
+                            .AddInParam("@FileColumnNumber", SqlDbType.Int, ts.FileColumnNumber)
                 );
             }
 
@@ -621,15 +578,16 @@ WHEN NOT MATCHED THEN
             // The exCollectionID should be pre-calculated by `CalcCollectionID`.
 
             // Check if the exCollectionID exists already:
-            bool collectionExists = await conn.ExecReader(
-@"SELECT TOP 1 1 FROM [dbo].[exCollectionKeyValue] WHERE [exCollectionID] = @exCollectionID",
+            int? collectionCount = await conn.ExecReader(
+@"SELECT COUNT(exCollectionID) FROM [dbo].[exCollectionKeyValue] WHERE [exCollectionID] = @exCollectionID",
                 prms =>
                     prms.AddInParamSHA1("@exCollectionID", exCollectionID),
-                async dr => await dr.ReadAsync()
+                    async dr => await dr.ReadAsync() ? dr.GetInt32(0) : (int?)null
             );
 
             // Don't bother logging name-value pairs if the collection already exists:
-            if (collectionExists) return;
+            if (!collectionCount.HasValue) return;
+            if (collectionCount.Value == coll.Count) return;
 
             const int numTasksPerPair = 2;
 
@@ -642,10 +600,10 @@ WHEN NOT MATCHED THEN
                 string name = coll.GetKey(i);
                 string value = coll.Get(i);
 
-                byte[] exCollectionValueID = SHA1Hash(value);
+                byte[] exCollectionValueID = Hash.SHA1(value);
 
                 // Merge the Value record:
-                tasks[i * numTasksPerPair + 0] = faultPolicy.Try(() => conn.ExecNonQuery(
+                tasks[i * numTasksPerPair + 0] = conn.ExecNonQuery(
 @"MERGE [dbo].[exCollectionValue] WITH (HOLDLOCK) AS target
 USING (SELECT @exCollectionValueID) AS source (exCollectionValueID)
 ON (target.exCollectionValueID = source.exCollectionValueID)
@@ -655,10 +613,10 @@ WHEN NOT MATCHED THEN
                     prms =>
                         prms.AddInParamSHA1("@exCollectionValueID", exCollectionValueID)
                             .AddInParamSize("@Value", SqlDbType.VarChar, -1, value)
-                ));
+                );
 
                 // Merge the Name-Value record:
-                tasks[i * numTasksPerPair + 1] = faultPolicy.Try(() => conn.ExecNonQuery(
+                tasks[i * numTasksPerPair + 1] = conn.ExecNonQuery(
 @"MERGE [dbo].[exCollectionKeyValue] WITH (HOLDLOCK) AS target
 USING (SELECT @exCollectionID, @Name, @exCollectionValueID) AS source (exCollectionID, Name, exCollectionValueID)
 ON (target.exCollectionID = source.exCollectionID AND target.Name = source.Name AND target.exCollectionValueID = source.exCollectionValueID)
@@ -669,24 +627,11 @@ WHEN NOT MATCHED THEN
                         prms.AddInParamSHA1("@exCollectionID", exCollectionID)
                             .AddInParamSize("@Name", SqlDbType.VarChar, 96, name)
                             .AddInParamSHA1("@exCollectionValueID", exCollectionValueID)
-                ));
+                );
             }
 
             // Our final task's completion depends on all the tasks created thus far:
             await Task.WhenAll(tasks);
-        }
-
-        static byte[] CalcTargetSiteID(System.Reflection.MethodBase methodBase)
-        {
-            if (methodBase == null) return null;
-            byte[] id = SHA1Hash(
-                String.Concat(
-                    methodBase.DeclaringType.Assembly.FullName, ":",
-                    methodBase.DeclaringType.FullName, ":",
-                    methodBase.Name
-                )
-            );
-            return id;
         }
 
         static byte[] CalcCollectionID(NameValueCollection coll)
@@ -700,13 +645,13 @@ WHEN NOT MATCHED THEN
                 sb.AppendFormat("{0}:{1}\n", name, coll.Get(name));
             }
 
-            byte[] id = SHA1Hash(sb.ToString());
+            byte[] id = Hash.SHA1(sb.ToString());
             return id;
         }
 
         static byte[] CalcApplicationID(ValidConfiguration cfg)
         {
-            byte[] id = SHA1Hash(
+            byte[] id = Hash.SHA1(
                 String.Concat(
                     cfg.MachineName, ":",
                     cfg.ApplicationName, ":",
@@ -719,7 +664,7 @@ WHEN NOT MATCHED THEN
 
         static byte[] CalcWebApplicationID(WebHostingContext host)
         {
-            byte[] id = SHA1Hash(
+            byte[] id = Hash.SHA1(
                 String.Concat(
                     host.MachineName, ":",
                     host.ApplicationID, ":",
@@ -733,22 +678,16 @@ WHEN NOT MATCHED THEN
 
         static byte[] CalcURLID(Uri uri)
         {
-            byte[] id = SHA1Hash("{0}://{1}:{2}{3}".F(uri.Scheme, uri.Host, uri.Port, uri.AbsolutePath));
+            byte[] id = Hash.SHA1("{0}://{1}:{2}{3}".F(uri.Scheme, uri.Host, uri.Port, uri.AbsolutePath));
             Debug.Assert(id.Length == 20);
             return id;
         }
 
         static byte[] CalcURLQueryID(Uri uri)
         {
-            byte[] id = SHA1Hash("{0}://{1}:{2}{3}{4}".F(uri.Scheme, uri.Host, uri.Port, uri.AbsolutePath, uri.Query));
+            byte[] id = Hash.SHA1("{0}://{1}:{2}{3}{4}".F(uri.Scheme, uri.Host, uri.Port, uri.AbsolutePath, uri.Query));
             Debug.Assert(id.Length == 20);
             return id;
-        }
-
-        internal static byte[] SHA1Hash(string p)
-        {
-            using (var sha1 = System.Security.Cryptography.SHA1Managed.Create())
-                return sha1.ComputeHash(new UTF8Encoding(false).GetBytes(p));
         }
 
         const string nl = "\n";

@@ -25,6 +25,9 @@ namespace Lorg
         internal readonly string AssemblyName;
         internal readonly string TypeName;
         internal readonly string StackTrace;
+        internal readonly ExceptionTargetSite TargetSite;
+
+        internal readonly StackTrace RealStackTrace;
 
         internal readonly DateTime LoggedTimeUTC;
         internal readonly int ManagedThreadID;
@@ -54,6 +57,8 @@ namespace Lorg
             WebHostingContext = webHostingContext;
             CapturedHttpContext = capturedHttpContext;
 
+            RealStackTrace = new StackTrace(ex, true);
+
             LoggedTimeUTC = DateTime.UtcNow;
             ManagedThreadID = Thread.CurrentThread.ManagedThreadId;
             SequenceNumber = Interlocked.Increment(ref runningSequenceNumber);
@@ -65,8 +70,17 @@ namespace Lorg
             // TODO(jsd): Sanitize embedded file paths in stack trace
             StackTrace = ex.StackTrace;
 
-            // SHA1 hash the `assemblyName:typeName:stackTrace`:
-            ExceptionID = Logger.SHA1Hash(String.Concat(AssemblyName, ":", TypeName, ":", StackTrace));
+            // SHA1 hash the `assemblyName:typeName:stackTrace[:targetSite]`:
+            string hashableData = String.Concat(AssemblyName, ":", TypeName, ":", StackTrace);
+
+            if (RealStackTrace != null && RealStackTrace.FrameCount > 0)
+            {
+                // Add in TargetSite data:
+                TargetSite = new ExceptionTargetSite(RealStackTrace);
+                hashableData += ":" + TargetSite.GetHashableData();
+            }
+
+            ExceptionID = Hash.SHA1(hashableData);
 
             // Recursively capture context for any InnerExceptions:
             if (ex.InnerException != null)
