@@ -1,5 +1,5 @@
 SELECT TOP 100
-      i.exInstanceID, i.LoggedTimeUTC, i.SequenceNumber, i.IsHandled, i.ParentInstanceID, i.CorrelationID, i.[Message]
+      i.exInstanceID, i.exExceptionID, i.LoggedTimeUTC, i.SequenceNumber, i.IsHandled, i.ParentInstanceID, i.CorrelationID, i.[Message]
     , app.ApplicationName, app.EnvironmentName
     , e.TypeName + ', ' + e.AssemblyName AS ExceptionType, e.exTargetSiteID, e.StackTrace
     , ts.[FileName], ts.FileLineNumber, ts.FileColumnNumber, ts.TypeName, ts.MethodName

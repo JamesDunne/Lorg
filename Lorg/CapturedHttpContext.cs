@@ -33,5 +33,4 @@ namespace Lorg
 
         public System.Collections.Specialized.NameValueCollection Headers { get; set; }
     }
-
 }

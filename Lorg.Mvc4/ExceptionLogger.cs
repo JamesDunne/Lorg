@@ -11,16 +11,16 @@ namespace Lorg.Mvc4
         /// <summary>
         /// Default instance of exception logger.
         /// </summary>
-        public static Logger Log { get; private set; }
+        static Logger logger;
 
         static WebHostingContext hostingContext = new WebHostingContext();
 
         public static void CreateLogger(Logger.Configuration cfg)
         {
-            Log = new Logger(Logger.ValidateConfiguration(cfg));
+            logger = new Logger(Logger.ValidateConfiguration(cfg));
         }
 
-        public static void CaptureAndLog(Exception ex, CapturedHttpContext httpContext, bool isHandled = false, Guid? correlationID = null)
+        public static ExceptionWithCapturedContext Capture(Exception ex, CapturedHttpContext httpContext, bool isHandled = false, Guid? correlationID = null)
         {
             // Capture the thread-specific bits first before we jump into async execution:
             var context = new ExceptionWithCapturedContext(
@@ -31,8 +31,13 @@ namespace Lorg.Mvc4
                 capturedHttpContext: httpContext
             );
 
+            return context;
+        }
+
+        public static Task<ILogIdentifier> Log(ExceptionWithCapturedContext context)
+        {
             // Run the exception logger asynchronously:
-            Task.Run(async () => await Log.Write(context));
+            return Task.Run(async () => await logger.Write(context));
         }
     }
 }

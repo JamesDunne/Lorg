@@ -110,17 +110,18 @@ namespace Lorg
         /// Write the exception to the database.
         /// </summary>
         /// <returns></returns>
-        public async Task Write(ExceptionWithCapturedContext thrown)
+        public async Task<ILogIdentifier> Write(ExceptionWithCapturedContext thrown)
         {
             try
             {
-                await WriteDatabase(thrown);
+                return await WriteDatabase(thrown);
             }
             catch (Exception ourEx)
             {
                 var actual = new ExceptionWithCapturedContext(ourEx, isHandled: true);
                 var report = new LoggerExceptionWithCapturedContext(actual, thrown);
                 FailoverWrite(report);
+                return (ILogIdentifier)null;
             }
         }
 
@@ -135,7 +136,7 @@ namespace Lorg
         /// <returns></returns>
         public async Task HandleExceptions(Func<Task> a, bool isHandled = false, Guid? correlationID = null)
         {
-            Exception exToLog = null;
+            ExceptionWithCapturedContext exToLog = null;
 
             try
             {
@@ -144,18 +145,18 @@ namespace Lorg
             catch (Exception ex)
             {
                 // NOTE(jsd): `await` is not allowed in catch blocks.
-                exToLog = ex;
-            }
-
-            if (exToLog != null)
-            {
-                await Write(new ExceptionWithCapturedContext(
-                    exToLog,
+                exToLog = new ExceptionWithCapturedContext(
+                    ex,
                     isHandled,
                     correlationID,
                     CurrentWebHost,
                     new CapturedHttpContext(System.Web.HttpContext.Current)
-                ));
+                );
+            }
+
+            if (exToLog != null)
+            {
+                await Write(exToLog);
             }
         }
 
@@ -247,7 +248,7 @@ namespace Lorg
         /// </summary>
         /// <param name="ctx"></param>
         /// <returns></returns>
-        async Task<Tuple<byte[], int>> WriteDatabase(ExceptionWithCapturedContext ctx, int? parentInstanceID = null)
+        async Task<ILogIdentifier> WriteDatabase(ExceptionWithCapturedContext ctx, int? parentInstanceID = null)
         {
             using (var conn = new SqlConnection(cfg.ConnectionString))
             {
@@ -300,7 +301,7 @@ namespace Lorg
             }
         }
 
-        async Task<Tuple<byte[], int>> LogExceptionRecursively(SqlConnectionContext conn, ExceptionWithCapturedContext ctx, int? parentInstanceID = null)
+        async Task<HashedLogIdentifier> LogExceptionRecursively(SqlConnectionContext conn, ExceptionWithCapturedContext ctx, int? parentInstanceID = null)
         {
             // Create the exTargetSite if it does not exist:
             var ts = ctx.TargetSite;
@@ -421,11 +422,11 @@ SET @exInstanceID = SCOPE_IDENTITY();",
             parentInstanceID = exInstanceID;
             while (inner != null)
             {
-                parentInstanceID = (await LogExceptionRecursively(conn, inner, parentInstanceID)).Item2;
+                parentInstanceID = (await LogExceptionRecursively(conn, inner, parentInstanceID)).InstanceID;
                 inner = inner.InnerException;
             }
 
-            return new Tuple<byte[], int>(ctx.ExceptionID, exInstanceID);
+            return new HashedLogIdentifier(ctx.ExceptionID, exInstanceID);
         }
 
         async Task LogWebContext(SqlConnectionContext conn, ExceptionPolicy policy, ExceptionWithCapturedContext ctx, int exInstanceID)

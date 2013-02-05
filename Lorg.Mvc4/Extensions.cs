@@ -1,4 +1,5 @@
-﻿using Lorg.Mvc4;
+﻿using Lorg;
+using Lorg.Mvc4;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -9,32 +10,38 @@ namespace System.Web.Mvc
 {
     public static class Extensions
     {
-        public static async Task<bool> Try(this Controller ctlr, Func<Task> a, bool isHandled = false, Guid? correlationID = null)
+        public static async Task<ILogIdentifier> Try(this Controller ctlr, Func<Task> a, bool isHandled = false, Guid? correlationID = null)
         {
+            ExceptionWithCapturedContext exlog;
+
             try
             {
                 await a();
-                return true;
+                return (ILogIdentifier)null;
             }
             catch (Exception ex)
             {
-                ExceptionLogger.CaptureAndLog(ex, new Lorg.CapturedHttpContext(ctlr.HttpContext), isHandled, correlationID);
-                return false;
+                exlog = ExceptionLogger.Capture(ex, new CapturedHttpContext(ctlr.HttpContext), isHandled, correlationID);
             }
+
+            return await ExceptionLogger.Log(exlog);
         }
 
-        public static async Task<bool> Try(this HttpContextBase ctx, Func<Task> a, bool isHandled = false, Guid? correlationID = null)
+        public static async Task<ILogIdentifier> Try(this HttpContextBase ctx, Func<Task> a, bool isHandled = false, Guid? correlationID = null)
         {
+            ExceptionWithCapturedContext exlog;
+
             try
             {
                 await a();
-                return true;
+                return (ILogIdentifier)null;
             }
             catch (Exception ex)
             {
-                ExceptionLogger.CaptureAndLog(ex, new Lorg.CapturedHttpContext(ctx), isHandled, correlationID);
-                return false;
+                exlog = ExceptionLogger.Capture(ex, new CapturedHttpContext(ctx), isHandled, correlationID);
             }
+
+            return await ExceptionLogger.Log(exlog);
         }
     }
 }
