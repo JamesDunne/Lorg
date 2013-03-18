@@ -418,13 +418,10 @@ SET @exInstanceID = SCOPE_IDENTITY();",
             await tskApplication;
 
             // Recursively log inner exceptions:
-            ExceptionWithCapturedContext inner = ctx.InnerException;
-            parentInstanceID = exInstanceID;
-            while (inner != null)
-            {
-                parentInstanceID = (await LogExceptionRecursively(conn, inner, parentInstanceID)).InstanceID;
-                inner = inner.InnerException;
-            }
+            var inner = ctx.InnerException;
+            if (inner != null)
+                // Return the inner-most exInstanceID because you can easily drill down through the ParentInstanceID columns to reach the root level.
+                return await LogExceptionRecursively(conn, inner, exInstanceID);
 
             return new HashedLogIdentifier(ctx.ExceptionID, exInstanceID);
         }
