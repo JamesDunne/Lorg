@@ -305,7 +305,7 @@ namespace Lorg
         {
             // Create the exTargetSite if it does not exist:
             var ts = ctx.TargetSite;
-            byte[] exTargetSiteID = null;
+            SHA1Hash? exTargetSiteID = null;
             Task tskTargetSite = null;
             if (ts != null)
             {
@@ -319,7 +319,7 @@ WHEN NOT MATCHED THEN
     INSERT ([exTargetSiteID], [AssemblyName], [TypeName], [MethodName], [ILOffset], [FileName], [FileLineNumber], [FileColumnNumber])
     VALUES (@exTargetSiteID,  @AssemblyName,  @TypeName , @MethodName , @ILOffset , @FileName , @FileLineNumber , @FileColumnNumber );",
                     prms =>
-                        prms.AddInParamSHA1("@exTargetSiteID", exTargetSiteID)
+                        prms.AddInParamSHA1("@exTargetSiteID", exTargetSiteID.GetValueOrDefault())
                             .AddInParamSize("@AssemblyName", SqlDbType.NVarChar, 256, ts.AssemblyName)
                             .AddInParamSize("@TypeName", SqlDbType.NVarChar, 256, ts.TypeName)
                             .AddInParamSize("@MethodName", SqlDbType.NVarChar, 256, ts.MethodName)
@@ -359,7 +359,7 @@ WHERE excpol.[exExceptionID] = @exExceptionID;",
             );
 
             // Create the exException record if it does not exist:
-            byte[] exApplicationID = CalcApplicationID(cfg);
+            var exApplicationID = CalcApplicationID(cfg);
             var tskApplication = conn.ExecNonQuery(
 @"MERGE [dbo].[exApplication] WITH (HOLDLOCK) AS target
 USING (SELECT @exApplicationID) AS source (exApplicationID)
@@ -441,9 +441,9 @@ SET @exInstanceID = SCOPE_IDENTITY();",
                 authUserName = http.User.Identity.Name;
 
             // Compute the IDs:
-            byte[] requestURLQueryID = CalcURLQueryID(http.Url);
-            byte[] referrerURLQueryID = http.UrlReferrer == null ? null : CalcURLQueryID(http.UrlReferrer);
-            byte[] exWebApplicationID = CalcWebApplicationID(host);
+            var requestURLQueryID = CalcURLQueryID(http.Url);
+            var referrerURLQueryID = http.UrlReferrer == null ? (SHA1Hash?)null : CalcURLQueryID(http.UrlReferrer);
+            var exWebApplicationID = CalcWebApplicationID(host);
 
             // Log the web application details:
             var tskWebApplication = conn.ExecNonQuery(
@@ -464,13 +464,13 @@ WHEN NOT MATCHED THEN
 
             // Log the request headers collection, if requested and available:
             Task tskCollection = null;
-            byte[] exCollectionID = null;
+            SHA1Hash? exCollectionID = null;
             if (policy.LogWebRequestHeaders && http.Headers != null)
             {
                 // Compute the collection hash (must be done BEFORE `tskContextWeb`):
                 exCollectionID = CalcCollectionID(http.Headers);
                 // Store all records for the headers collection:
-                tskCollection = LogCollection(conn, exCollectionID, http.Headers);
+                tskCollection = LogCollection(conn, exCollectionID.Value, http.Headers);
             }
 
             // Log the web context:
@@ -512,7 +512,7 @@ VALUES (@exInstanceID,  @exWebApplicationID,  @AuthenticatedUserName,  @HttpVerb
         /// <returns></returns>
         Task LogURL(SqlConnectionContext conn, Uri uri)
         {
-            byte[] urlID = CalcURLID(uri);
+            var urlID = CalcURLID(uri);
 
             return conn.ExecNonQuery(
 @"MERGE [dbo].[exURL] WITH (HOLDLOCK) AS target
@@ -539,10 +539,10 @@ WHEN NOT MATCHED THEN
         async Task LogURLQuery(SqlConnectionContext conn, Uri uri)
         {
             // Log the base URL:
-            byte[] urlID = CalcURLID(uri);
+            var urlID = CalcURLID(uri);
 
             // Compute the URLQueryID:
-            byte[] urlQueryID = CalcURLQueryID(uri);
+            var urlQueryID = CalcURLQueryID(uri);
 
             // Store the exURL record:
             var tskLogURL = LogURL(conn, uri);
@@ -571,7 +571,7 @@ WHEN NOT MATCHED THEN
         /// <param name="exCollectionID"></param>
         /// <param name="coll"></param>
         /// <returns></returns>
-        async Task LogCollection(SqlConnectionContext conn, byte[] exCollectionID, NameValueCollection coll)
+        async Task LogCollection(SqlConnectionContext conn, SHA1Hash exCollectionID, NameValueCollection coll)
         {
             // The exCollectionID should be pre-calculated by `CalcCollectionID`.
 
@@ -598,7 +598,7 @@ WHEN NOT MATCHED THEN
                 string name = coll.GetKey(i);
                 string value = coll.Get(i);
 
-                byte[] exCollectionValueID = Hash.SHA1(value);
+                var exCollectionValueID = Hash.SHA1(value);
 
                 // Merge the Value record:
                 tasks[i * numTasksPerPair + 0] = conn.ExecNonQuery(
@@ -632,7 +632,7 @@ WHEN NOT MATCHED THEN
             await Task.WhenAll(tasks);
         }
 
-        static byte[] CalcCollectionID(NameValueCollection coll)
+        static SHA1Hash CalcCollectionID(NameValueCollection coll)
         {
             // Guesstimate the capacity required (40 chars per name/value pair):
             var sb = new StringBuilder(coll.Count * 40);
@@ -643,13 +643,13 @@ WHEN NOT MATCHED THEN
                 sb.AppendFormat("{0}:{1}\n", name, coll.Get(name));
             }
 
-            byte[] id = Hash.SHA1(sb.ToString());
+            var id = Hash.SHA1(sb.ToString());
             return id;
         }
 
-        static byte[] CalcApplicationID(ValidConfiguration cfg)
+        static SHA1Hash CalcApplicationID(ValidConfiguration cfg)
         {
-            byte[] id = Hash.SHA1(
+            var id = Hash.SHA1(
                 String.Concat(
                     cfg.MachineName, ":",
                     cfg.ApplicationName, ":",
@@ -660,9 +660,9 @@ WHEN NOT MATCHED THEN
             return id;
         }
 
-        static byte[] CalcWebApplicationID(WebHostingContext host)
+        static SHA1Hash CalcWebApplicationID(WebHostingContext host)
         {
-            byte[] id = Hash.SHA1(
+            var id = Hash.SHA1(
                 String.Concat(
                     host.MachineName, ":",
                     host.ApplicationID, ":",
@@ -674,17 +674,15 @@ WHEN NOT MATCHED THEN
             return id;
         }
 
-        static byte[] CalcURLID(Uri uri)
+        static SHA1Hash CalcURLID(Uri uri)
         {
-            byte[] id = Hash.SHA1("{0}://{1}:{2}{3}".F(uri.Scheme, uri.Host, uri.Port, uri.AbsolutePath));
-            Debug.Assert(id.Length == 20);
+            var id = Hash.SHA1("{0}://{1}:{2}{3}".F(uri.Scheme, uri.Host, uri.Port, uri.AbsolutePath));
             return id;
         }
 
-        static byte[] CalcURLQueryID(Uri uri)
+        static SHA1Hash CalcURLQueryID(Uri uri)
         {
-            byte[] id = Hash.SHA1("{0}://{1}:{2}{3}{4}".F(uri.Scheme, uri.Host, uri.Port, uri.AbsolutePath, uri.Query));
-            Debug.Assert(id.Length == 20);
+            var id = Hash.SHA1("{0}://{1}:{2}{3}{4}".F(uri.Scheme, uri.Host, uri.Port, uri.AbsolutePath, uri.Query));
             return id;
         }
 

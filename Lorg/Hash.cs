@@ -8,10 +8,10 @@ namespace Lorg
 {
     public static class Hash
     {
-        public static byte[] SHA1(string value)
+        public static SHA1Hash SHA1(string value)
         {
             using (var sha1 = System.Security.Cryptography.SHA1Managed.Create())
-                return sha1.ComputeHash(new UTF8Encoding(false).GetBytes(value));
+                return new SHA1Hash(sha1.ComputeHash(new UTF8Encoding(false).GetBytes(value)));
         }
     }
 }

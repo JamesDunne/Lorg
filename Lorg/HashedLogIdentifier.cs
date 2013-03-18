@@ -8,10 +8,10 @@ namespace Lorg
 {
     public struct HashedLogIdentifier : ILogIdentifier
     {
-        readonly byte[] _sha1hash;
+        readonly SHA1Hash _sha1hash;
         readonly int _instanceID;
 
-        public HashedLogIdentifier(byte[] sha1hash, int instanceID)
+        public HashedLogIdentifier(SHA1Hash sha1hash, int instanceID)
         {
             _sha1hash = sha1hash;
             _instanceID = instanceID;

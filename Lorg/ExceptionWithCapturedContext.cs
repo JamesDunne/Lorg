@@ -21,7 +21,7 @@ namespace Lorg
         internal readonly CapturedHttpContext CapturedHttpContext;
         internal readonly WebHostingContext WebHostingContext;
 
-        internal readonly byte[] ExceptionID;
+        internal readonly SHA1Hash ExceptionID;
         internal readonly string AssemblyName;
         internal readonly string TypeName;
         internal readonly string StackTrace;

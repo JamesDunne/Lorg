@@ -18,7 +18,7 @@ namespace Lorg
         public readonly int FileLineNumber;
         public readonly int FileColumnNumber;
 
-        public readonly byte[] TargetSiteID;
+        public readonly SHA1Hash TargetSiteID;
 
         internal ExceptionTargetSite(StackTrace trace)
         {
