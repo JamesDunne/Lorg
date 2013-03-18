@@ -47,7 +47,37 @@ namespace LorgMvcTest.Controllers
 
         public async Task<ActionResult> Inner()
         {
-            return await Test(1, async () => { throw new Exception("Test; 1st level", new Exception("Inner test; 2nd level", new System.IO.FileNotFoundException("Could not find example file; 3rd level", new Exception("4th level")))); });
+            return await Test(500, async () => { throw new Exception("Test; 1st level", new Exception("Inner test; 2nd level", new System.IO.FileNotFoundException("Could not find example file; 3rd level", new Exception("4th level")))); });
+        }
+
+        public async Task<ActionResult> InnerTry()
+        {
+            return await Test(500, async () =>
+            {
+                //throw new Exception("Test; 1st level", new Exception("Inner test; 2nd level", new System.IO.FileNotFoundException("Could not find example file; 3rd level", new Exception("4th level"))));
+                try
+                {
+                    try
+                    {
+                        try
+                        {
+                            throw new Exception("4th level");
+                        }
+                        catch (Exception ex3)
+                        {
+                            throw new System.IO.FileNotFoundException("Could not find example file; 3rd level", ex3);
+                        }
+                    }
+                    catch (Exception ex2)
+                    {
+                        throw new Exception("Inner test; 2nd level", ex2);
+                    }
+                }
+                catch (Exception ex1)
+                {
+                    throw new Exception("Test; 1st level", ex1);
+                }
+            });
         }
 
         public async Task<JsonResult> Json()
