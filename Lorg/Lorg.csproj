@@ -56,11 +56,13 @@
     <Compile Include="ILogIdentifier.cs" />
     <Compile Include="Logger.cs" />
     <Compile Include="Maybe.cs" />
+    <Compile Include="NameValueCollectionDictionary.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
     <Compile Include="SHA1Hash.cs" />
     <Compile Include="SqlConnectionContext.cs" />
     <Compile Include="LoggerExceptionWithCapturedContext.cs" />
     <Compile Include="WebHostingContext.cs" />
+    <Compile Include="WrappedException.cs" />
   </ItemGroup>
   <ItemGroup>
     <None Include="app.config" />

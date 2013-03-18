@@ -33,6 +33,8 @@ namespace Lorg
         internal readonly int ManagedThreadID;
         internal readonly int SequenceNumber;
 
+        internal readonly IDictionary<string, string> UserState;
+
         internal static int runningSequenceNumber = 0;
 
         /// <summary>
@@ -51,13 +53,23 @@ namespace Lorg
             CapturedHttpContext capturedHttpContext = null
         )
         {
+            // Check for a WrappedException to pull out custom Exception info:
+            WrappedException wex = ex as WrappedException;
+            Exception thrownEx = ex;
+            if (wex != null)
+            {
+                UserState = wex.UserState;
+                ex = wex.Wrapped;
+            }
+
             Exception = ex;
+
             IsHandled = isHandled;
             CorrelationID = correlationID;
             WebHostingContext = webHostingContext;
             CapturedHttpContext = capturedHttpContext;
 
-            RealStackTrace = new StackTrace(ex, true);
+            RealStackTrace = new StackTrace(thrownEx, true);
 
             LoggedTimeUTC = DateTime.UtcNow;
             ManagedThreadID = Thread.CurrentThread.ManagedThreadId;
@@ -68,7 +80,7 @@ namespace Lorg
             AssemblyName = exType.Assembly.FullName;
             TypeName = exType.FullName;
             // TODO(jsd): Sanitize embedded file paths in stack trace
-            StackTrace = ex.StackTrace;
+            StackTrace = thrownEx.StackTrace;
 
             // SHA1 hash the `assemblyName:typeName:stackTrace[:targetSite]`:
             string hashableData = String.Concat(AssemblyName, ":", TypeName, ":", StackTrace);
@@ -82,7 +94,6 @@ namespace Lorg
 
             ExceptionID = Hash.SHA1(hashableData);
 
-            // Recursively capture context for any InnerExceptions:
             if (ex.InnerException != null)
                 InnerException = new ExceptionWithCapturedContext(ex.InnerException, isHandled, correlationID, webHostingContext, capturedHttpContext);
         }

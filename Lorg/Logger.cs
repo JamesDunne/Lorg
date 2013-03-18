@@ -330,6 +330,12 @@ WHEN NOT MATCHED THEN
                 );
             }
 
+            SHA1Hash? userStateCollectionID = null;
+            if (ctx.UserState != null)
+            {
+                userStateCollectionID = CalcCollectionID(ctx.UserState);
+            }
+
             // Create the exException record if it does not exist:
             var tskGetPolicy = conn.ExecReader(
 @"MERGE [dbo].[exException] WITH (HOLDLOCK) AS target
@@ -378,8 +384,8 @@ WHEN NOT MATCHED THEN
             // Create the instance record:
             var tskInstance = conn.ExecNonQuery(
 @"INSERT INTO [dbo].[exInstance]
-       ([exExceptionID], [exApplicationID], [LoggedTimeUTC], [SequenceNumber], [IsHandled], [ApplicationIdentity], [ParentInstanceID], [CorrelationID], [ManagedThreadId], [Message])
-VALUES (@exExceptionID,  @exApplicationID,  @LoggedTimeUTC,  @SequenceNumber,  @IsHandled,  @ApplicationIdentity,  @ParentInstanceID,  @CorrelationID,  @ManagedThreadId,  @Message );
+       ([exExceptionID], [exApplicationID], [LoggedTimeUTC], [SequenceNumber], [IsHandled], [ApplicationIdentity], [ParentInstanceID], [CorrelationID], [ManagedThreadId], [UserStateCollectionID], [Message])
+VALUES (@exExceptionID,  @exApplicationID,  @LoggedTimeUTC,  @SequenceNumber,  @IsHandled,  @ApplicationIdentity,  @ParentInstanceID,  @CorrelationID,  @ManagedThreadId,  @UserStateCollectionID,  @Message );
 SET @exInstanceID = SCOPE_IDENTITY();",
                 prms =>
                     prms.AddOutParam("@exInstanceID", SqlDbType.Int)
@@ -392,6 +398,7 @@ SET @exInstanceID = SCOPE_IDENTITY();",
                         .AddInParam("@ParentInstanceID", SqlDbType.Int, parentInstanceID)
                         .AddInParam("@CorrelationID", SqlDbType.UniqueIdentifier, ctx.CorrelationID)
                         .AddInParam("@ManagedThreadId", SqlDbType.Int, ctx.ManagedThreadID)
+                        .AddInParamSHA1("@UserStateCollectionID", userStateCollectionID)
                         .AddInParamSize("@Message", SqlDbType.NVarChar, 256, ctx.Exception.Message),
                 (prms, rc) =>
                 {
@@ -411,6 +418,10 @@ SET @exInstanceID = SCOPE_IDENTITY();",
             {
                 tskLoggingWeb = LogWebContext(conn, policy, ctx, exInstanceID);
             }
+
+            // Log the UserState collection:
+            if (userStateCollectionID != null)
+                await LogCollection(conn, userStateCollectionID.Value, ctx.UserState);
 
             // Wait for any outstanding logging tasks:
             if (tskLoggingWeb != null) await tskLoggingWeb;
@@ -467,10 +478,11 @@ WHEN NOT MATCHED THEN
             SHA1Hash? exCollectionID = null;
             if (policy.LogWebRequestHeaders && http.Headers != null)
             {
+                var tmpDict = new NameValueCollectionDictionary(http.Headers);
                 // Compute the collection hash (must be done BEFORE `tskContextWeb`):
-                exCollectionID = CalcCollectionID(http.Headers);
+                exCollectionID = CalcCollectionID(tmpDict);
                 // Store all records for the headers collection:
-                tskCollection = LogCollection(conn, exCollectionID.Value, http.Headers);
+                tskCollection = LogCollection(conn, exCollectionID.Value, tmpDict);
             }
 
             // Log the web context:
@@ -571,7 +583,7 @@ WHEN NOT MATCHED THEN
         /// <param name="exCollectionID"></param>
         /// <param name="coll"></param>
         /// <returns></returns>
-        async Task LogCollection(SqlConnectionContext conn, SHA1Hash exCollectionID, NameValueCollection coll)
+        async Task LogCollection(SqlConnectionContext conn, SHA1Hash exCollectionID, IDictionary<string, string> coll)
         {
             // The exCollectionID should be pre-calculated by `CalcCollectionID`.
 
@@ -593,10 +605,11 @@ WHEN NOT MATCHED THEN
             var tasks = new Task[coll.Count * numTasksPerPair];
 
             // Fill out the array of tasks with concurrent MERGE statements for each name/value pair:
-            for (int i = 0; i < coll.Count; ++i)
+            using (var en = coll.Keys.GetEnumerator())
+            for (int i = 0; en.MoveNext(); ++i)
             {
-                string name = coll.GetKey(i);
-                string value = coll.Get(i);
+                string name = en.Current;
+                string value = coll[name];
 
                 var exCollectionValueID = Hash.SHA1(value);
 
@@ -632,15 +645,15 @@ WHEN NOT MATCHED THEN
             await Task.WhenAll(tasks);
         }
 
-        static SHA1Hash CalcCollectionID(NameValueCollection coll)
+        static SHA1Hash CalcCollectionID(IDictionary<string, string> coll)
         {
             // Guesstimate the capacity required (40 chars per name/value pair):
             var sb = new StringBuilder(coll.Count * 40);
 
             // Compute the hash of the collection as a series of name-ordered "{name}:{value}\n" strings:
-            foreach (string name in coll.AllKeys.OrderBy(k => k))
+            foreach (string name in coll.Keys.OrderBy(k => k))
             {
-                sb.AppendFormat("{0}:{1}\n", name, coll.Get(name));
+                sb.AppendFormat("{0}:{1}\n", name, coll[name]);
             }
 
             var id = Hash.SHA1(sb.ToString());
