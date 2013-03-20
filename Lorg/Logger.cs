@@ -191,19 +191,64 @@ namespace Lorg
             FailoverWriteString(output);
         }
 
+        static bool TryToCreateEventLogSource(string source)
+        {
+            bool sourceExists = false;
+            try
+            {
+                sourceExists = EventLog.SourceExists(source);
+            }
+            catch (Exception ex)
+            {
+                // I got nothin'.
+                Trace.WriteLine(ex, "EventLog SourceExists failed: {0}".F(ex.Message));
+            }
+
+            // Ensure the event log source exists:
+            if (!sourceExists)
+                try
+                {
+                    EventLog.CreateEventSource(source, "Application");
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    // I got nothin'.
+                    Trace.WriteLine(ex, "EventLog CreateEventSource failed: {0}".F(ex.Message));
+                }
+
+            return false;
+        }
+
+        static void TryToWriteEventLog(string source, string message, EventLogEntryType type = EventLogEntryType.Error)
+        {
+            try
+            {
+                // Log a Windows event log entry:
+                EventLog.WriteEntry(source, message, type);
+            }
+            catch (Exception ex)
+            {
+                // I got nothin'.
+                Trace.WriteLine(ex, "EventLog WriteEntry failed: {0}".F(ex.Message));
+            }
+        }
+
         void FailoverWriteString(string output)
         {
             // Write to the Trace:
             Trace.WriteLine(output);
-            try
+
+            // Write to the event log, making sure we have a source to write to:
+            string source = cfg.ApplicationName;
+            if (!TryToCreateEventLogSource(source))
             {
-                // Log a Windows event log entry:
-                EventLog.WriteEntry(cfg.ApplicationName, output, EventLogEntryType.Error);
+                // Unable to create custom log due to insufficient privileges (most likely), so log to "Application" instead:
+                output = "ALERT: Could not create custom event log source named '{0}', most likely due to insufficient privileges.{1}{1}Original exception details follow:{1}{1}".F(source, Environment.NewLine) + output;
+                source = "Application";
             }
-            catch
-            {
-                // I got nothin'.
-            }
+
+            TryToWriteEventLog(source, output);
         }
 
         public static string FormatException(ExceptionWithCapturedContext ctx)
@@ -606,40 +651,40 @@ WHEN NOT MATCHED THEN
 
             // Fill out the array of tasks with concurrent MERGE statements for each name/value pair:
             using (var en = coll.Keys.GetEnumerator())
-            for (int i = 0; en.MoveNext(); ++i)
-            {
-                string name = en.Current;
-                string value = coll[name];
+                for (int i = 0; en.MoveNext(); ++i)
+                {
+                    string name = en.Current;
+                    string value = coll[name];
 
-                var exCollectionValueID = Hash.SHA1(value);
+                    var exCollectionValueID = Hash.SHA1(value);
 
-                // Merge the Value record:
-                tasks[i * numTasksPerPair + 0] = conn.ExecNonQuery(
-@"MERGE [dbo].[exCollectionValue] WITH (HOLDLOCK) AS target
+                    // Merge the Value record:
+                    tasks[i * numTasksPerPair + 0] = conn.ExecNonQuery(
+    @"MERGE [dbo].[exCollectionValue] WITH (HOLDLOCK) AS target
 USING (SELECT @exCollectionValueID) AS source (exCollectionValueID)
 ON (target.exCollectionValueID = source.exCollectionValueID)
 WHEN NOT MATCHED THEN
     INSERT ([exCollectionValueID], [Value])
     VALUES (@exCollectionValueID,  @Value );",
-                    prms =>
-                        prms.AddInParamSHA1("@exCollectionValueID", exCollectionValueID)
-                            .AddInParamSize("@Value", SqlDbType.VarChar, -1, value)
-                );
+                        prms =>
+                            prms.AddInParamSHA1("@exCollectionValueID", exCollectionValueID)
+                                .AddInParamSize("@Value", SqlDbType.VarChar, -1, value)
+                    );
 
-                // Merge the Name-Value record:
-                tasks[i * numTasksPerPair + 1] = conn.ExecNonQuery(
-@"MERGE [dbo].[exCollectionKeyValue] WITH (HOLDLOCK) AS target
+                    // Merge the Name-Value record:
+                    tasks[i * numTasksPerPair + 1] = conn.ExecNonQuery(
+    @"MERGE [dbo].[exCollectionKeyValue] WITH (HOLDLOCK) AS target
 USING (SELECT @exCollectionID, @Name, @exCollectionValueID) AS source (exCollectionID, Name, exCollectionValueID)
 ON (target.exCollectionID = source.exCollectionID AND target.Name = source.Name AND target.exCollectionValueID = source.exCollectionValueID)
 WHEN NOT MATCHED THEN
     INSERT ([exCollectionID], [Name], [exCollectionValueID])
     VALUES (@exCollectionID,  @Name,  @exCollectionValueID );",
-                    prms =>
-                        prms.AddInParamSHA1("@exCollectionID", exCollectionID)
-                            .AddInParamSize("@Name", SqlDbType.VarChar, 96, name)
-                            .AddInParamSHA1("@exCollectionValueID", exCollectionValueID)
-                );
-            }
+                        prms =>
+                            prms.AddInParamSHA1("@exCollectionID", exCollectionID)
+                                .AddInParamSize("@Name", SqlDbType.VarChar, 96, name)
+                                .AddInParamSHA1("@exCollectionValueID", exCollectionValueID)
+                    );
+                }
 
             // Our final task's completion depends on all the tasks created thus far:
             await Task.WhenAll(tasks);
