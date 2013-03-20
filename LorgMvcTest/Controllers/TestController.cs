@@ -71,7 +71,7 @@ namespace LorgMvcTest.Controllers
                     catch (Exception ex2)
                     {
                         throw new Exception("Inner test; 2nd level", ex2)
-                            .Wrap(new Dictionary<string, string> { { "test", "value" }, { "test2", "value2" } });
+                            .With(new Dictionary<string, string> { { "test", "value" }, { "test2", "value2" } });
                     }
                 }
                 catch (Exception ex1)

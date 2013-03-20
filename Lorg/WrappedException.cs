@@ -24,7 +24,7 @@ namespace System
 {
     public static class ExceptionExtensions
     {
-        public static Lorg.WrappedException Wrap(this Exception ex, IDictionary<string, string> userState)
+        public static Lorg.WrappedException With(this Exception ex, IDictionary<string, string> userState)
         {
             return new Lorg.WrappedException(ex, userState);
         }
